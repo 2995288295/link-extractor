@@ -181,9 +181,9 @@ def _get_device(req, issue_new: bool = True):
     """解析并校验请求中的 device_id + 签名。
 
     返回 (device_id, signature, valid)：
-    - 签名有效：直接使用
-    - 无签名/签名无效且 issue_new=True：生成新设备（原请求视为新设备）
-    - 签名无效且 issue_new=False：标记 invalid（用于校验类接口）
+    - 签名有效：直接使用，valid=True
+    - 无签名/签名无效：签发新设备（原请求视为新设备），valid=False
+      （valid=False 表示设备身份不可信，调用方可跳过设备级限速）
     """
     device_id = req.headers.get("X-Device-Id", "")
     signature = req.headers.get("X-Device-Sig", "")
@@ -192,7 +192,7 @@ def _get_device(req, issue_new: bool = True):
     if issue_new:
         new_id = str(uuid.uuid4())
         new_sig = _sign_device_id(new_id)
-        return new_id, new_sig, True  # 新签发的必然有效
+        return new_id, new_sig, False  # 新签发的可正常使用，但原设备身份不可信
     return device_id, signature, False
 
 
@@ -230,6 +230,9 @@ def _check_rate_limit(bucket_key: str, limit: int) -> bool:
             "INSERT OR REPLACE INTO rate_limits (bucket_key, timestamps, updated_at) VALUES (?,?,?)",
             (bucket_key, json.dumps(timestamps), now),
         )
+        # 定期清理过期桶（防止表无限增长；每 ~100 次写触发一次）
+        if int(now) % 100 == 0:
+            conn.execute("DELETE FROM rate_limits WHERE updated_at < ?", (now - 3600,))
         conn.commit()
         return True
     except Exception:
@@ -240,7 +243,12 @@ def _check_rate_limit(bucket_key: str, limit: int) -> bool:
 
 
 def _rate_limit_check(ip: str, device_id: str) -> bool:
-    """IP + 设备双维度限速。"""
+    """IP + 设备双维度限速。
+
+    设备维度仅在客户端提供了有效签名时生效（签名无效/未提供时
+    _get_device 已签发新设备，但这里用原始值判断，避免无签名请求
+    每次换新设备绕过设备限速）。
+    """
     if not _check_rate_limit(f"ip:{ip}", RATE_IP_PER_MINUTE):
         return False
     if device_id and not _check_rate_limit(f"dev:{device_id}", RATE_DEVICE_PER_MINUTE):
@@ -292,8 +300,9 @@ def api_health():
 @app.route("/api/extract", methods=["POST"])
 def api_extract():
     ip = request.remote_addr or "127.0.0.1"
-    device_id, device_sig, _valid = _get_device(request)
-    if not _rate_limit_check(ip, device_id):
+    device_id, device_sig, device_valid = _get_device(request)
+    # 无有效设备签名时跳过设备限速（防伪造设备每次换新绕过），仅靠 IP 限速兜底
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
         return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
 
     data = request.get_json(silent=True) or {}
@@ -429,8 +438,8 @@ def api_extract():
 @app.route("/api/history", methods=["GET"])
 def api_history():
     ip = request.remote_addr or "127.0.0.1"
-    device_id, device_sig, valid = _get_device(request)
-    if not _rate_limit_check(ip, device_id):
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
         return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
 
     conn = _get_db()
@@ -447,8 +456,8 @@ def api_history():
 @app.route("/api/history", methods=["DELETE"])
 def api_history_clear():
     ip = request.remote_addr or "127.0.0.1"
-    device_id, device_sig, valid = _get_device(request)
-    if not _rate_limit_check(ip, device_id):
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
         return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
 
     conn = _get_db()
@@ -464,8 +473,8 @@ def api_history_clear():
 def api_stats():
     """统计看板：总数/成功/失败/平台分布/近7天趋势（按设备 ID 隔离）。"""
     ip = request.remote_addr or "127.0.0.1"
-    device_id, device_sig, valid = _get_device(request)
-    if not _rate_limit_check(ip, device_id):
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
         return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
 
     conn = _get_db()
