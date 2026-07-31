@@ -161,6 +161,34 @@ def _safe_get_with_redirects(url: str, *, headers=None, timeout=10, max_redirect
     raise RuntimeError("链接重定向次数过多")
 
 
+def _safe_follow_redirects(session, url: str, *, headers=None, timeout=30, max_redirects=5):
+    """手动跟随重定向（allow_redirects=False），每跳校验目标域名与公网 IP。
+
+    用于抖音/小红书提取链路：入口 URL 已过 _is_safe_url 白名单，
+    此处确保重定向目标也安全（防被劫持跳转到内网）。
+    返回 (最终响应, 最终URL)；调用方用最终 URL 提取信息。
+    """
+    current = url
+    for _ in range(max_redirects + 1):
+        if not _is_safe_url(current):
+            raise RuntimeError(f"重定向目标不在允许范围: {current[:80]}")
+        resp = session.get(
+            current,
+            headers=headers or {},
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location", "")
+            if not location:
+                return resp, current
+            current = urljoin(current, location)
+            continue
+        return resp, current
+    raise RuntimeError("重定向次数过多")
+
+
 # ---------------------------------------------------------------- 工具函数
 
 def _extract_first_url(text: str) -> str:
@@ -325,21 +353,8 @@ def _extract_douyin(url: str) -> dict[str, Any]:
     source_url = _extract_first_url(url)
     session = _get_session()
 
-    def _request_with_retry(target: str, **kw) -> requests.Response:
-        last_exc: Exception | None = None
-        for attempt in (1, 2):
-            try:
-                resp = session.get(target, headers=DOUYIN_MOBILE_HEADERS, timeout=30, **kw)
-                resp.raise_for_status()
-                return resp
-            except Exception as e:
-                last_exc = e
-                time.sleep(1.0)
-        raise RuntimeError(f"请求抖音页面失败: {last_exc}")
-
-    # 首次请求：跟随重定向到最终分享页
-    share_response = _request_with_retry(source_url, allow_redirects=True)
-    final_url = share_response.url or source_url
+    # 首次请求：手动跟随重定向到最终分享页（每跳校验目标安全）
+    share_response, final_url = _safe_follow_redirects(session, source_url, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
     video_id = final_url.split("?")[0].strip("/").split("/")[-1]
     share_kind = "note" if "/note/" in final_url else "video"
     share_url = f"https://www.iesdouyin.com/share/{share_kind}/{video_id}"
@@ -348,7 +363,7 @@ def _extract_douyin(url: str) -> dict[str, Any]:
     match = pattern.search(share_response.text)
     if not match:
         # 第二次请求：构造的 iesdouyin share URL
-        response = _request_with_retry(share_url)
+        response, _final = _safe_follow_redirects(session, share_url, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
         match = pattern.search(response.text)
     if not match:
         # 仍无数据：大概率是 JS 挑战页/风控，等待后带新会话重试一次
@@ -356,7 +371,7 @@ def _extract_douyin(url: str) -> dict[str, Any]:
         session2 = _get_session()
         for target in (share_url, source_url):
             try:
-                resp = session2.get(target, headers=DOUYIN_MOBILE_HEADERS, timeout=30, allow_redirects=True)
+                resp, _fin = _safe_follow_redirects(session2, target, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
                 match = pattern.search(resp.text)
                 if match:
                     break
@@ -440,7 +455,9 @@ def _extract_douyin(url: str) -> dict[str, Any]:
 def _extract_xhs_initial_state(url: str) -> dict[str, Any]:
     """小红书提取：__INITIAL_STATE__ 页面状态解析（信息最全）。"""
     source_url = _extract_first_url(url)
-    response = _get_session().get(source_url, headers=XHS_HEADERS, timeout=30, allow_redirects=True)
+    response, final_url = _safe_follow_redirects(
+        _get_session(), source_url, headers=XHS_HEADERS, timeout=30
+    )
     response.raise_for_status()
 
     html = response.text
@@ -464,7 +481,7 @@ def _extract_xhs_initial_state(url: str) -> dict[str, Any]:
 
     note_id = note.get("noteId") or ""
     if not note_id:
-        m = re.search(r"/(?:explore|discovery/item)/([^/?]+)", response.url)
+        m = re.search(r"/(?:explore|discovery/item)/([^/?]+)", final_url)
         note_id = m.group(1) if m else ""
 
     image_urls = []
@@ -679,13 +696,18 @@ def extract_link(raw: str) -> ExtractResult:
             cache_put(post_id, result.to_dict())
         return result
     except Exception as e:
-        # 业务错误（作品不存在/不可访问等）只记 warning，避免刷屏；网络异常才打完整 traceback
+        # 已知业务错误（作品不存在/缺参数等）对用户有用，保留友好文案；只进日志，不泄露堆栈
         if isinstance(e, (ValueError, RuntimeError)):
             logger.warning("提取失败: %s | 原因: %s", url[:80], e)
-        else:
-            logger.exception("提取失败(异常): %s", url[:80])
+            return ExtractResult(
+                success=False,
+                error=f"提取失败: {str(e)}",
+                hint="请检查链接是否正确、作品是否公开可见、小红书链接是否带 xsec_token",
+            )
+        # 未知异常：脱敏，仅记录详细日志（路径/库名/堆栈不外泄）
+        logger.exception("提取失败(异常): %s", url[:80])
         return ExtractResult(
             success=False,
-            error=f"提取失败: {str(e)}",
-            hint="请检查链接是否正确、作品是否公开可见、小红书链接是否带 xsec_token",
+            error="提取失败，请稍后重试",
+            hint="请检查链接是否正确、作品是否公开可见",
         )

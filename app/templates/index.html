@@ -208,6 +208,26 @@ textarea:focus { border-color: var(--primary); }
 footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 32px; }
 .footer-note { margin-bottom: 4px; }
 .footer-author { color: #9aa0a8; font-size: 11px; }
+
+.token-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 30, .45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.token-dialog {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 100%;
+  max-width: 320px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.12);
+}
+.token-dialog h3 { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
 .loading-spinner {
   display: inline-block;
   width: 14px; height: 14px;
@@ -324,17 +344,123 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
     <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.1</div>
+    <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="clearAccessToken()">🔑 清除口令 / 退出</button>
   </footer>
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- 访问口令弹窗 -->
+<div class="token-overlay hidden" id="tokenOverlay">
+  <div class="token-dialog">
+    <h3>请输入访问口令</h3>
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px;">本工具仅限受邀使用，请输入管理员提供的口令</p>
+    <input type="password" id="tokenInput" placeholder="访问口令" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;outline:none;">
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button class="btn btn-primary" id="tokenSubmit" style="flex:1;">确认</button>
+      <button class="btn btn-ghost" id="tokenCancel">取消</button>
+    </div>
+  </div>
+</div>
 
 <script>
 function getCookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   return m ? decodeURIComponent(m[1]) : "";
 }
-let deviceId = localStorage.getItem("device_id") || getCookie("device_id") || "";
+// ================= 安全：访问口令 + 设备签名 =================
+let accessToken = localStorage.getItem("access_token") || "";
+let deviceId = localStorage.getItem("device_id") || "";
+let deviceSig = localStorage.getItem("device_sig") || "";
+
+/** 统一的 API 请求封装：自动带口令 + 设备签名，处理 401 */
+async function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  headers["Content-Type"] = "application/json";
+  if (accessToken) headers["X-Access-Token"] = accessToken;
+  if (deviceId) headers["X-Device-Id"] = deviceId;
+  if (deviceSig) headers["X-Device-Sig"] = deviceSig;
+
+  const res = await fetch(url, { ...options, headers });
+
+  // 401：口令错误或未提供 → 弹窗让用户输入
+  if (res.status === 401) {
+    const json = await res.json().catch(() => ({}));
+    if (json.error && json.error.includes("访问口令")) {
+      const ok = await promptForToken();
+      if (ok) {
+        // 重新发起原请求
+        headers["X-Access-Token"] = accessToken;
+        const retry = await fetch(url, { ...options, headers });
+        return handleDevicePayload(retry);
+      }
+      throw new Error(json.error || "访问口令错误或未提供");
+    }
+    throw new Error(json.error || "请求失败(401)");
+  }
+  if (res.status === 429) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.error || "请求过于频繁");
+  }
+  return handleDevicePayload(res);
+}
+
+/** 从响应中提取并保存 device_id + device_sig（后端签发的） */
+async function handleDevicePayload(res) {
+  const clone = res.clone();
+  const json = await res.json().catch(() => ({}));
+  if (json.device_id && json.device_sig) {
+    deviceId = json.device_id;
+    deviceSig = json.device_sig;
+    localStorage.setItem("device_id", deviceId);
+    localStorage.setItem("device_sig", deviceSig);
+  }
+  return json;
+}
+
+/** 构建带口令 + 设备签名的请求头 */
+function buildHeaders(extra = {}) {
+  const headers = { "Content-Type": "application/json", ...extra };
+  if (accessToken) headers["X-Access-Token"] = accessToken;
+  if (deviceId) headers["X-Device-Id"] = deviceId;
+  if (deviceSig) headers["X-Device-Sig"] = deviceSig;
+  return headers;
+}
+
+/** 简洁口令输入弹窗（非登录页） */
+function promptForToken() {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("tokenOverlay");
+    const input = document.getElementById("tokenInput");
+    overlay.classList.remove("hidden");
+    input.value = "";
+    input.focus();
+
+    const submit = () => {
+      const val = input.value.trim();
+      if (!val) return;
+      accessToken = val;
+      localStorage.setItem("access_token", val);
+      overlay.classList.add("hidden");
+      showToast("口令已保存");
+      resolve(true);
+    };
+    document.getElementById("tokenSubmit").onclick = submit;
+    input.onkeydown = (e) => { if (e.key === "Enter") submit(); };
+    document.getElementById("tokenCancel").onclick = () => {
+      overlay.classList.add("hidden");
+      resolve(false);
+    };
+  });
+}
+
+/** 清除口令 / 退出 */
+function clearAccessToken() {
+  if (!confirm("确定清除访问口令吗？清除后需重新输入才能使用。")) return;
+  accessToken = "";
+  localStorage.removeItem("access_token");
+  showToast("已退出，口令已清除");
+}
 
 // ---------- 移动端交互（C 项） ----------
 // 注册 PWA Service Worker（HTTP 环境注册失败会静默忽略，不影响功能）
@@ -502,13 +628,24 @@ async function doExtract(isAuto = false) {
   let failCount = 0;
 
   try {
-    const headers = { "Content-Type": "application/json" };
-    if (deviceId) headers["X-Device-Id"] = deviceId;
-    const res = await fetch("/api/extract", {
+    let res = await fetch("/api/extract", {
       method: "POST",
-      headers,
+      headers: buildHeaders(),
       body: JSON.stringify({ urls }),
     });
+    // 401：口令错误/未提供 → 弹窗输入后重试一次
+    if (res.status === 401) {
+      const j = await res.json().catch(() => ({}));
+      if (j.error && j.error.includes("访问口令")) {
+        const ok = await promptForToken();
+        if (!ok) throw new Error("访问口令错误或未提供");
+        res = await fetch("/api/extract", {
+          method: "POST",
+          headers: buildHeaders(),
+          body: JSON.stringify({ urls }),
+        });
+      }
+    }
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       throw new Error(j.error || `请求失败(${res.status})`);
@@ -521,6 +658,7 @@ async function doExtract(isAuto = false) {
     let buffer = "";
     let appended = 0;
     let deviceIdFromServer = "";
+    let deviceSigFromServer = "";
 
     while (true) {
       const { done, value } = await reader.read();
@@ -533,7 +671,10 @@ async function doExtract(isAuto = false) {
         let msg;
         try { msg = JSON.parse(line); } catch (e) { continue; }
         if (msg.type === "start") {
-          if (msg.device_id && !deviceId) deviceIdFromServer = msg.device_id;
+          if (msg.device_id && msg.device_sig) {
+            deviceIdFromServer = msg.device_id;
+            deviceSigFromServer = msg.device_sig;
+          }
           status.textContent = `正在提取 ${msg.total} 条链接...（完成 ${0}/${msg.total}）`;
         } else if (msg.type === "item") {
           const r = msg.data;
@@ -550,9 +691,11 @@ async function doExtract(isAuto = false) {
       }
     }
 
-    if (deviceIdFromServer && !deviceId) {
+    if (deviceIdFromServer && deviceSigFromServer) {
       deviceId = deviceIdFromServer;
+      deviceSig = deviceSigFromServer;
       localStorage.setItem("device_id", deviceId);
+      localStorage.setItem("device_sig", deviceSig);
     }
     status.textContent = `完成：成功 ${okCount} 条，失败 ${failCount} 条`;
     lastAutoValue = raw;  // 记录已提取内容，避免自动重复提取
@@ -667,13 +810,24 @@ function unescapeHtml(s) {
 
 /** 流式提取单条链接，返回结果对象（供重试用） */
 async function extractOneStream(url) {
-  const headers = { "Content-Type": "application/json" };
-  if (deviceId) headers["X-Device-Id"] = deviceId;
-  const res = await fetch("/api/extract", {
+  let res = await fetch("/api/extract", {
     method: "POST",
-    headers,
+    headers: buildHeaders(),
     body: JSON.stringify({ urls: [url] }),
   });
+  // 401：弹窗输入后重试一次
+  if (res.status === 401) {
+    const j = await res.json().catch(() => ({}));
+    if (j.error && j.error.includes("访问口令")) {
+      const ok = await promptForToken();
+      if (!ok) throw new Error("访问口令错误或未提供");
+      res = await fetch("/api/extract", {
+        method: "POST",
+        headers: buildHeaders(),
+        body: JSON.stringify({ urls: [url] }),
+      });
+    }
+  }
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
     throw new Error(j.error || `请求失败(${res.status})`);
@@ -693,9 +847,11 @@ async function extractOneStream(url) {
       try {
         const msg = JSON.parse(line);
         if (msg.type === "item") result = msg.data;
-        if (msg.type === "start" && msg.device_id && !deviceId) {
+        if (msg.type === "start" && msg.device_id && msg.device_sig) {
           deviceId = msg.device_id;
+          deviceSig = msg.device_sig;
           localStorage.setItem("device_id", deviceId);
+          localStorage.setItem("device_sig", deviceSig);
         }
       } catch (e) { /* 忽略坏行 */ }
     }
@@ -763,10 +919,6 @@ function reindexResults() {
 async function loadStats() {
   try {
     const data = await apiFetch("/api/stats");
-    if (data.device_id && !deviceId) {
-      deviceId = data.device_id;
-      localStorage.setItem("device_id", deviceId);
-    }
     renderStats(data);
   } catch (e) {
     document.getElementById("statsGrid").innerHTML =
@@ -850,10 +1002,6 @@ async function loadHistory() {
   try {
     const data = await apiFetch("/api/history");
     status.textContent = data.items.length ? `共 ${data.items.length} 条历史记录（仅自己可见）` : "暂无历史记录";
-    if (data.device_id && !deviceId) {
-      deviceId = data.device_id;
-      localStorage.setItem("device_id", deviceId);
-    }
     if (!data.items.length) {
       list.innerHTML = '<div class="card" style="color:var(--text2);text-align:center;">暂无历史记录</div>';
       return;

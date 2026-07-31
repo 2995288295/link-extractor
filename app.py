@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
+import hmac
 import json
 import logging
 import os
 import random
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -28,6 +31,15 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from lib.extractor import extract_link
+
+# ---------------------------------------------------------------- 安全配置
+
+ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
+DEVICE_SECRET = os.environ.get("DEVICE_SECRET", "")
+if not DEVICE_SECRET:
+    DEVICE_SECRET = secrets.token_hex(16)
+    log_warn = logging.getLogger(__name__)
+    log_warn.warning("DEVICE_SECRET 未设置，已生成临时密钥（重启后已签发的 device_id 将失效）；生产环境请设置环境变量 DEVICE_SECRET")
 
 # ---------------------------------------------------------------- 日志
 
@@ -68,6 +80,25 @@ def _log_request_start():
     if request.path.startswith("/api/"):
         request._start_time = time.time()
         log.info(">>> [%s] %s from %s", request.method, request.path, request.remote_addr)
+
+
+# ---------------------------------------------------------------- 访问口令校验
+
+@app.before_request
+def _check_access_token():
+    """轻量访问口令：环境变量 ACCESS_TOKEN 设置后生效（未设置则跳过，方便本地开发）。
+
+    - 所有 /api/* 接口需携带请求头 X-Access-Token
+    - hmac.compare_digest 安全比对防时序攻击
+    - /api/health 豁免（部署探活需要）
+    """
+    if not ACCESS_TOKEN:
+        return None  # 未配置口令，跳过校验（本地开发模式）
+    if request.path.startswith("/api/") and request.path != "/api/health":
+        provided = request.headers.get("X-Access-Token", "")
+        if not provided or not hmac.compare_digest(provided, ACCESS_TOKEN):
+            return jsonify({"success": False, "error": "访问口令错误或未提供"}), 401
+    return None
 
 
 @app.after_request
@@ -113,6 +144,15 @@ def _init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rate_limits (
+            bucket_key TEXT PRIMARY KEY,
+            timestamps TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_history_device ON history(device_id, created_at)")
     conn.commit()
     conn.close()
@@ -120,51 +160,95 @@ def _init_db():
 
 _init_db()
 
-# ---------------------------------------------------------------- 设备 ID
+# ---------------------------------------------------------------- 设备 ID（带签名防伪造）
 
-def _get_device_id(req) -> str:
-    """从 X-Device-Id 头或 cookie 获取设备 ID，不存在则生成新 ID。"""
-    device_id = req.headers.get("X-Device-Id", "")
-    if not device_id:
-        device_id = req.cookies.get("device_id", "")
-    if device_id and len(device_id) <= 64:
-        return device_id
-    return str(uuid.uuid4())
+def _sign_device_id(device_id: str) -> str:
+    """用服务端密钥对 device_id 生成 HMAC-SHA256 签名。"""
+    return hmac.new(DEVICE_SECRET.encode("utf-8"), device_id.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-# ---------------------------------------------------------------- 速率限制
-
-_rate_limits: dict[str, list[float]] = {}
-MAX_REQUESTS_PER_MINUTE = 30
-
-
-def _check_rate_limit(ip: str) -> bool:
-    now = time.time()
-    bucket = _rate_limits.setdefault(ip, [])
-    bucket[:] = [t for t in bucket if now - t < 60]
-    if len(bucket) >= MAX_REQUESTS_PER_MINUTE:
+def _verify_device_signature(device_id: str, signature: str) -> bool:
+    """校验 device_id 签名，防止伪造他人 device_id 越权访问历史/统计。"""
+    if not device_id or not signature:
         return False
-    bucket.append(now)
+    if len(device_id) > 64 or len(signature) > 128:
+        return False
+    expected = _sign_device_id(device_id)
+    return hmac.compare_digest(expected, signature)
+
+
+def _get_device(req, issue_new: bool = True):
+    """解析并校验请求中的 device_id + 签名。
+
+    返回 (device_id, signature, valid)：
+    - 签名有效：直接使用
+    - 无签名/签名无效且 issue_new=True：生成新设备（原请求视为新设备）
+    - 签名无效且 issue_new=False：标记 invalid（用于校验类接口）
+    """
+    device_id = req.headers.get("X-Device-Id", "")
+    signature = req.headers.get("X-Device-Sig", "")
+    if device_id and _verify_device_signature(device_id, signature):
+        return device_id, signature, True
+    if issue_new:
+        new_id = str(uuid.uuid4())
+        new_sig = _sign_device_id(new_id)
+        return new_id, new_sig, True  # 新签发的必然有效
+    return device_id, signature, False
+
+
+def _device_cookie_payload(device_id: str, signature: str):
+    """响应中附带的设备标识载荷。"""
+    return {"device_id": device_id, "device_sig": signature}
+
+
+# ---------------------------------------------------------------- 速率限制（SQLite 持久化）
+
+RATE_IP_PER_MINUTE = int(os.environ.get("RATE_IP_PER_MINUTE", "20"))      # 每 IP 每分钟
+RATE_DEVICE_PER_MINUTE = int(os.environ.get("RATE_DEVICE_PER_MINUTE", "15"))  # 每设备每分钟
+_RATE_WINDOW = 60  # 秒
+
+
+def _check_rate_limit(bucket_key: str, limit: int) -> bool:
+    """SQLite 持久化的滑动窗口限速；超限返回 False。"""
+    now = time.time()
+    cutoff = now - _RATE_WINDOW
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT timestamps FROM rate_limits WHERE bucket_key = ?", (bucket_key,)
+        ).fetchone()
+        try:
+            timestamps = json.loads(row["timestamps"]) if row else []
+        except (ValueError, TypeError):
+            timestamps = []
+        # 清理窗口外的旧时间戳
+        timestamps = [t for t in timestamps if t > cutoff]
+        if len(timestamps) >= limit:
+            return False
+        timestamps.append(now)
+        conn.execute(
+            "INSERT OR REPLACE INTO rate_limits (bucket_key, timestamps, updated_at) VALUES (?,?,?)",
+            (bucket_key, json.dumps(timestamps), now),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        # 限速失败时放行（避免限速器本身成为故障点）
+        return True
+    finally:
+        conn.close()
+
+
+def _rate_limit_check(ip: str, device_id: str) -> bool:
+    """IP + 设备双维度限速。"""
+    if not _check_rate_limit(f"ip:{ip}", RATE_IP_PER_MINUTE):
+        return False
+    if device_id and not _check_rate_limit(f"dev:{device_id}", RATE_DEVICE_PER_MINUTE):
+        return False
     return True
 
 
 # ---------------------------------------------------------------- API
-
-@app.after_request
-def _set_device_cookie(response):
-    """响应时把设备 ID 写进 cookie（所有 API 方法），前端无需手动处理。"""
-    if request.path.startswith("/api/"):
-        existing = request.cookies.get("device_id")
-        if not existing:
-            device_id = request.headers.get("X-Device-Id", "")
-            if device_id:
-                response.set_cookie(
-                    "device_id", device_id,
-                    max_age=60 * 60 * 24 * 365, httponly=False,
-                    samesite="Lax",
-                )
-    return response
-
 
 @app.after_request
 def _optimize_response(response):
@@ -208,10 +292,10 @@ def api_health():
 @app.route("/api/extract", methods=["POST"])
 def api_extract():
     ip = request.remote_addr or "127.0.0.1"
-    if not _check_rate_limit(ip):
+    device_id, device_sig, _valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id):
         return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
 
-    device_id = _get_device_id(request)
     data = request.get_json(silent=True) or {}
     raw = data.get("urls", "")
 
@@ -297,8 +381,10 @@ def api_extract():
 
     def _stream():
         """并发提取，每条完成立即 yield（ndjson），前端逐条渲染。"""
-        # 先发头帧
-        yield json.dumps({"type": "start", "total": len(urls), "device_id": device_id}, ensure_ascii=False) + "\n"
+        # 先发头帧（携带设备标识，前端保存）
+        payload = {"type": "start", "total": len(urls)}
+        payload.update(_device_cookie_payload(device_id, device_sig))
+        yield json.dumps(payload, ensure_ascii=False) + "\n"
         done = 0
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = {pool.submit(_process_one, u): u for u in urls}
@@ -312,7 +398,7 @@ def api_extract():
                         "original_url": url, "success": False, "platform": "", "platform_raw": "",
                         "title": "", "caption": "", "author_name": "", "publish_time": "",
                         "like_count": 0, "video_url": "", "canonical_url": "", "cover_url": "",
-                        "post_id": "", "error": f"提取异常: {e}", "hint": "请稍后重试",
+                        "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
                     }
                 done += 1
                 yield json.dumps({"type": "item", "index": done, "data": item}, ensure_ascii=False) + "\n"
@@ -342,30 +428,46 @@ def api_extract():
 
 @app.route("/api/history", methods=["GET"])
 def api_history():
-    device_id = _get_device_id(request)
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
     conn = _get_db()
     rows = conn.execute(
         "SELECT * FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 50", (device_id,)
     ).fetchall()
     conn.close()
     items = [dict(row) for row in rows]
-    return jsonify({"success": True, "items": items, "device_id": device_id})
+    resp = {"success": True, "items": items}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
 
 
 @app.route("/api/history", methods=["DELETE"])
 def api_history_clear():
-    device_id = _get_device_id(request)
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
     conn = _get_db()
     conn.execute("DELETE FROM history WHERE device_id = ?", (device_id,))
     conn.commit()
     conn.close()
-    return jsonify({"success": True})
+    resp = {"success": True}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
 
 
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
     """统计看板：总数/成功/失败/平台分布/近7天趋势（按设备 ID 隔离）。"""
-    device_id = _get_device_id(request)
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
     conn = _get_db()
 
     total = conn.execute(
@@ -399,22 +501,26 @@ def api_stats():
         trend.append({"date": day.strftime("%m-%d"), "count": cnt})
 
     conn.close()
-    return jsonify({
+    resp = {
         "success": True,
-        "device_id": device_id,
         "total": total,
         "ok": ok_count,
         "fail": fail_count,
         "success_rate": round(ok_count / total * 100, 1) if total else 0,
         "platform_dist": platform_dist,
         "trend": trend,
-    })
+    }
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
 
 
 # ---------------------------------------------------------------- 封面代理
 
 import requests as _requests
+from urllib.parse import urljoin as _urljoin
 from urllib.parse import urlparse as _urlparse
+
+from lib.extractor import _is_safe_url as _extractor_safe_url
 
 _cover_cache: dict[str, tuple[bytes, str, float]] = {}
 COVER_CACHE_SECONDS = 60 * 60 * 24  # 封面缓存 24 小时
@@ -426,15 +532,40 @@ _ALLOWED_IMAGE_HOSTS = (
 
 
 def _is_cover_url_safe(url: str) -> bool:
-    """封面代理白名单：仅允许抖音/小红书的图片域名（防 SSRF）。"""
+    """封面代理白名单：仅允许抖音/小红书的图片域名，且 DNS 解析后为公网 IP（防 SSRF）。"""
     try:
         parsed = _urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return False
         host = (parsed.hostname or "").lower()
-        return any(d in host for d in _ALLOWED_IMAGE_HOSTS)
+        if not any(host == d or host.endswith("." + d) for d in _ALLOWED_IMAGE_HOSTS):
+            return False
+        # 复用提取器的安全校验：解析 IP 并拒绝内网/回环地址
+        return _extractor_safe_url(url)
     except Exception:
         return False
+
+
+def _fetch_cover_with_redirect_check(url: str, timeout: int = 15, max_redirects: int = 5):
+    """手动跟随重定向，每跳都校验目标域名（防重定向跳转内网 SSRF）。"""
+    current = url
+    for _ in range(max_redirects + 1):
+        if not _is_cover_url_safe(current):
+            raise RuntimeError("封面地址校验失败")
+        resp = _requests.get(
+            current,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"},
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location", "")
+            if not location:
+                return resp
+            current = _urljoin(current, location)
+            continue
+        return resp
+    raise RuntimeError("重定向次数过多")
 
 
 @app.route("/api/cover")
@@ -453,12 +584,7 @@ def api_cover():
         return resp
 
     try:
-        r = _requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"},
-            timeout=15,
-            allow_redirects=True,
-        )
+        r = _fetch_cover_with_redirect_check(url)
         if r.status_code != 200 or not r.content:
             return "fetch failed", 502
         ctype = r.headers.get("Content-Type", "image/jpeg").split(";")[0]

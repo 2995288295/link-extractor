@@ -2,7 +2,7 @@
 # =====================================================
 # 链接提取工具 - 服务器一键部署脚本
 # 适用：Debian 12 / Ubuntu 等 Linux 服务器（Python 3.10+）
-# 用法：sudo bash deploy.sh
+# 用法：ACCESS_TOKEN="你的口令" DEVICE_SECRET="随机串" sudo bash deploy.sh
 # =====================================================
 set -e
 
@@ -14,6 +14,10 @@ echo "=============================================="
 echo " 链接提取工具部署"
 echo " 目标目录: $APP_DIR"
 echo " 端口: $PORT"
+if [ -z "${ACCESS_TOKEN:-}" ]; then
+    echo " [警告] 未设置 ACCESS_TOKEN，服务将无访问口令（任何人可用）！"
+    echo "         建议: ACCESS_TOKEN=你的口令 DEVICE_SECRET=随机串 sudo bash deploy.sh"
+fi
 echo "=============================================="
 
 # 1. 检查 root 权限
@@ -65,6 +69,8 @@ After=network.target
 
 [Service]
 WorkingDirectory=$APP_DIR
+Environment=ACCESS_TOKEN=${ACCESS_TOKEN:-}
+Environment=DEVICE_SECRET=${DEVICE_SECRET:-}
 ExecStart=$APP_DIR/venv/bin/gunicorn -w 1 -b 0.0.0.0:${PORT} app:app --timeout 60
 Restart=always
 RestartSec=3

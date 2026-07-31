@@ -70,6 +70,22 @@ PORT=8080 python app.py
 # http://127.0.0.1:5003
 ```
 
+## 安全配置（环境变量）
+
+| 环境变量 | 必填 | 说明 |
+|---------|------|------|
+| `ACCESS_TOKEN` | 部署时必须 | 访问口令。设置后所有 API 需携带 `X-Access-Token` 头；未设置则跳过校验（本地开发用）。**给朋友分享前务必设置** |
+| `DEVICE_SECRET` | 推荐 | 设备签名密钥。用于防伪造 device_id（历史越权）；未设置自动生成临时密钥（重启后设备失效） |
+| `RATE_IP_PER_MINUTE` | 可选 | 每 IP 每分钟请求上限，默认 20 |
+| `RATE_DEVICE_PER_MINUTE` | 可选 | 每设备每分钟请求上限，默认 15 |
+
+示例（Linux 部署）：
+```bash
+ACCESS_TOKEN="你的私人口令" DEVICE_SECRET="一串随机字符" ./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 60
+```
+
+> 前端首次访问会弹出口令输入框，输入后保存在浏览器 localStorage；页脚有「清除口令/退出」按钮。
+
 ## 部署到服务器（Debian 12 已验证环境）
 
 服务器要求：Python 3.10+，无需 Docker，无需 Node.js。
