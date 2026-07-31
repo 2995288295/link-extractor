@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 运行时数据（历史记录、日志、数据库）
+data/
+*.db
+*.log
+*.tmp
+
+# 系统
+.DS_Store
+Thumbs.db
