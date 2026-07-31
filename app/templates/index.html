@@ -491,16 +491,6 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
   });
 })();
 
-async function apiFetch(url, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  headers["Content-Type"] = "application/json";
-  if (deviceId) headers["X-Device-Id"] = deviceId;
-  const res = await fetch(url, { ...options, headers });
-  const json = await res.json().catch(() => ({}));
-  if (!json.success && res.status === 429) throw new Error(json.error || "请求过于频繁");
-  return json;
-}
-
 function showToast(msg) {
   const t = document.getElementById("toast");
   t.textContent = msg;
@@ -1064,6 +1054,20 @@ async function clearHistory() {
     showToast("清空失败");
   }
 }
+
+// ================= 页面加载时验证访问口令 =================
+// 进入页面即检测：无口令直接弹窗；有口令静默验证，失效则重弹
+window.addEventListener("load", async function () {
+  try {
+    // 调用一个轻量 API 验证口令（history 已启用限速且轻量）
+    await apiFetch("/api/history");
+  } catch (e) {
+    // apiFetch 内部对 401 已触发弹窗；此处仅兜底
+    if (e && e.message && e.message.includes("访问口令")) {
+      showToast("请先输入访问口令");
+    }
+  }
+});
 </script>
 </body>
 </html>
