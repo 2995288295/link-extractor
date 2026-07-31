@@ -91,10 +91,11 @@ def _check_access_token():
     - 所有 /api/* 接口需携带请求头 X-Access-Token
     - hmac.compare_digest 安全比对防时序攻击
     - /api/health 豁免（部署探活需要）
+    - /api/cover 豁免（前端 <img> 标签无法携带自定义请求头；该接口有域名白名单 + 重定向逐跳校验，仅返回图片数据）
     """
     if not ACCESS_TOKEN:
         return None  # 未配置口令，跳过校验（本地开发模式）
-    if request.path.startswith("/api/") and request.path != "/api/health":
+    if request.path.startswith("/api/") and request.path not in ("/api/health", "/api/cover"):
         provided = request.headers.get("X-Access-Token", "")
         if not provided or not hmac.compare_digest(provided, ACCESS_TOKEN):
             return jsonify({"success": False, "error": "访问口令错误或未提供"}), 401
@@ -529,8 +530,6 @@ import requests as _requests
 from urllib.parse import urljoin as _urljoin
 from urllib.parse import urlparse as _urlparse
 
-from lib.extractor import _is_safe_url as _extractor_safe_url
-
 _cover_cache: dict[str, tuple[bytes, str, float]] = {}
 COVER_CACHE_SECONDS = 60 * 60 * 24  # 封面缓存 24 小时
 _ALLOWED_IMAGE_HOSTS = (
@@ -541,16 +540,30 @@ _ALLOWED_IMAGE_HOSTS = (
 
 
 def _is_cover_url_safe(url: str) -> bool:
-    """封面代理白名单：仅允许抖音/小红书的图片域名，且 DNS 解析后为公网 IP（防 SSRF）。"""
+    """封面代理白名单：仅允许抖音/小红书的图片域名，且 DNS 解析后为公网 IP（防 SSRF）。
+
+    注意：不复用提取器的 _is_safe_url（它只认页面域名 douyin.com/xiaohongshu.com，
+    不含图片 CDN 域名 douyinpic.com 等）。这里独立做 域名白名单 + 公网 IP 校验。
+    """
     try:
+        import ipaddress as _ipaddress
+        import socket as _socket
+
         parsed = _urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return False
         host = (parsed.hostname or "").lower()
         if not any(host == d or host.endswith("." + d) for d in _ALLOWED_IMAGE_HOSTS):
             return False
-        # 复用提取器的安全校验：解析 IP 并拒绝内网/回环地址
-        return _extractor_safe_url(url)
+        # 公网 IP 校验（拒绝内网/回环/链路本地地址，防 SSRF）
+        addresses = _socket.getaddrinfo(host, None)
+        if not addresses:
+            return False
+        for info in addresses:
+            ip = _ipaddress.ip_address(info[4][0])
+            if not ip.is_global:
+                return False
+        return True
     except Exception:
         return False
 
@@ -580,6 +593,11 @@ def _fetch_cover_with_redirect_check(url: str, timeout: int = 15, max_redirects:
 @app.route("/api/cover")
 def api_cover():
     """代理封面图片：绕开跨域防盗链 + 签名校验，带 24h 缓存。"""
+    # 封面接口豁免口令（img 标签无法带 header），但需 IP 限速防滥用
+    ip = request.remote_addr or "127.0.0.1"
+    if not _check_rate_limit(f"cover:{ip}", RATE_IP_PER_MINUTE):
+        return "too many requests", 429
+
     url = request.args.get("url", "")
     if not url or not _is_cover_url_safe(url) or len(url) > 1000:
         return "bad url", 400
