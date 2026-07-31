@@ -1,0 +1,21 @@
+{
+  "name": "链接提取工具",
+  "short_name": "链接提取",
+  "description": "粘贴抖音/小红书分享链接，自动提取转换链接与文案，逐条复制",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#3a7afe",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

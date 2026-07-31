@@ -2,7 +2,14 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#3a7afe">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="链接提取">
 <title>链接提取工具</title>
 <style>
 :root {
@@ -227,6 +234,41 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   pointer-events: none;
 }
 .toast.show { opacity: 1; }
+
+/* ================= 移动端适配（A/C 项） ================= */
+@media (max-width: 600px) {
+  .container { padding: 16px 12px 72px; }
+  header { padding: 18px 0 14px; }
+  header h1 { font-size: 20px; }
+  header p { font-size: 13px; }
+  .card { padding: 14px; }
+  textarea { min-height: 96px; font-size: 14px; }
+  .toolbar { gap: 8px; }
+  .toolbar .btn { flex: 1; padding: 12px 10px; font-size: 14px; }
+  /* 触控区 ≥44px（手机标准） */
+  .btn { min-height: 44px; }
+  .copy-row .btn { min-height: 44px; font-size: 14px; }
+  /* 封面缩小 */
+  .cover { width: 56px; height: 56px; }
+  /* 统计卡片窄屏单列 */
+  .stats-grid { grid-template-columns: 1fr; gap: 10px; }
+  .stat-card .num { font-size: 24px; }
+  /* 趋势图在小屏高度自适应 */
+  .trend-line { height: 140px; }
+  /* tab 栏触控加大 */
+  .tab { padding: 10px 14px; font-size: 14px; }
+  /* 结果卡片间距收紧 */
+  .result-item { padding: 12px; }
+  .field-value { font-size: 13px; }
+  /* toast 顶部避开刘海 */
+  .toast { top: calc(12px + env(safe-area-inset-top)); }
+  .footer-author { font-size: 10px; }
+}
+
+/* 大屏更大方 */
+@media (min-width: 901px) {
+  .container { max-width: 960px; }
+}
 </style>
 </head>
 <body>
@@ -293,6 +335,35 @@ function getCookie(name) {
   return m ? decodeURIComponent(m[1]) : "";
 }
 let deviceId = localStorage.getItem("device_id") || getCookie("device_id") || "";
+
+// ---------- 移动端交互（C 项） ----------
+// 注册 PWA Service Worker（HTTP 环境注册失败会静默忽略，不影响功能）
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("/static/sw.js").catch(function () {
+      /* HTTP 环境无法注册，忽略 */
+    });
+  });
+}
+
+// 输入框聚焦时自动滚动到可视区，避免手机键盘遮挡
+(function () {
+  const ta = document.getElementById("inputUrls");
+  if (!ta) return;
+  const isMobile = () => window.matchMedia("(max-width: 600px)").matches;
+  ta.addEventListener("focus", function () {
+    if (isMobile()) {
+      setTimeout(() => {
+        const rect = ta.getBoundingClientRect();
+        const viewH = window.innerHeight;
+        // 若输入框下半部分超出可视区，滚动到合适位置
+        if (rect.bottom > viewH * 0.55) {
+          window.scrollTo({ top: ta.offsetTop - 80, behavior: "smooth" });
+        }
+      }, 300);
+    }
+  });
+})();
 
 async function apiFetch(url, options = {}) {
   const headers = { ...(options.headers || {}) };
