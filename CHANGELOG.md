@@ -2,6 +2,16 @@
 
 本项目的所有重要变更均记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.2] - 2026-07-31
+
+### 性能优化
+- **SQLite WAL 模式**：并发读写不再互相阻塞，多线程写库性能显著提升（+ busy_timeout 防锁死）
+- **gzip 响应压缩**：API 文本/JSON 响应自动压缩（压缩率实测 ~92%），在线传输体积大幅下降；文件响应与流式响应自动跳过（修复 direct_passthrough 兼容问题）
+- **静态资源浏览器缓存**：manifest/图标等加 `Cache-Control: max-age=3600`，重复打开更快（sw.js 除外避免更新失效）
+
+### 修复
+- after_request gzip 逻辑对 `send_from_directory` 文件响应抛 `RuntimeError` 的问题（跳过文件/流式响应）
+
 ## [v1.1] - 2026-07-31
 
 ### 新增

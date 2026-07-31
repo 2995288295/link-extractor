@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from lib.extractor import extract_link
 
@@ -80,8 +81,11 @@ def _log_request_end(response):
 # ---------------------------------------------------------------- 数据库
 
 def _get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # WAL 模式：并发读写不互相阻塞，提升多线程写库性能
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -159,6 +163,40 @@ def _set_device_cookie(response):
                     max_age=60 * 60 * 24 * 365, httponly=False,
                     samesite="Lax",
                 )
+    return response
+
+
+@app.after_request
+def _optimize_response(response):
+    """性能优化：
+    1. 静态资源浏览器缓存（1 小时）
+    2. text/json 响应 gzip 压缩（传输体积降 ~70%）
+    """
+    # 静态资源缓存（manifest/图标等；sw.js 不缓存避免更新失效）
+    if request.path.startswith("/static/") and "/sw.js" not in request.path:
+        response.headers.setdefault("Cache-Control", "public, max-age=3600")
+
+    # gzip 压缩（仅普通字符串响应，跳过文件响应/流式响应）
+    # send_from_directory 文件响应有 Accept-Ranges 头且 body 是流，get_data() 不可用
+    if (
+        response.status_code == 200
+        and not response.direct_passthrough
+        and "Accept-Ranges" not in response.headers
+        and "gzip" in (request.headers.get("Accept-Encoding") or "")
+        and response.content_type
+        and response.content_type.startswith(("text/", "application/json", "application/javascript"))
+    ):
+        try:
+            data = response.get_data()
+        except RuntimeError:
+            return response  # 流式/无法读取，跳过
+        if data and len(data) > 500:
+            gz = gzip.compress(data, compresslevel=5)
+            if len(gz) < len(data):  # 压缩确实更小才用
+                response.set_data(gz)
+                response.headers["Content-Encoding"] = "gzip"
+                response.headers["Vary"] = "Accept-Encoding"
+                response.headers["Content-Length"] = str(len(gz))
     return response
 
 
@@ -295,7 +333,6 @@ def api_extract():
             pass
         yield json.dumps({"type": "end", "done": done}, ensure_ascii=False) + "\n"
 
-    from flask import Response
     return Response(
         _stream(),
         mimetype="application/x-ndjson",
