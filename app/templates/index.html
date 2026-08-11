@@ -112,7 +112,7 @@ textarea:focus { border-color: var(--primary); }
   padding: 2px 10px;
   border-radius: 999px;
 }
-.platform-douyin { background: #fef0f0; color: #d4380d; }
+.platform-douyin { background: #1a1a1a; color: #fff; }
 .platform-xiaohongshu { background: #fff0f5; color: #d63384; }
 .result-index { font-size: 13px; color: var(--text2); }
 .result-badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 500; }
@@ -349,7 +349,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.6</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.7</div>
   </footer>
 </div>
 
@@ -688,12 +688,13 @@ function resultCardHtml(r, i) {
     if (r.author_name) extra.push(["作者", r.author_name]);
     if (r.publish_time) extra.push(["发布时间", r.publish_time]);
     if (r.like_count) extra.push(["点赞", String(r.like_count)]);
-    if (r.video_url && r.video_url !== r.canonical_url) extra.push(["视频链接", r.video_url]);
+    // 原视频链接很长（带签名参数），标记为可折叠长链接（单行省略 + 悬停完整）
+    if (r.video_url && r.video_url !== r.canonical_url) extra.push(["视频链接", r.video_url, true]);
 
     if (extra.length) {
       html += `<div class="field" style="margin-top:10px;"><div class="field-label">更多信息</div>`;
-      extra.forEach(([label, value]) => {
-        html += `<div class="field"><div class="field-label">${label}</div><div class="field-value">${esc(value)}</div></div>`;
+      extra.forEach(([label, value, isLongLink]) => {
+        html += `<div class="field"><div class="field-label">${label}</div><div class="field-value${isLongLink ? " link" : ""}"${isLongLink ? ` title="${esc(value)}"` : ""}>${esc(value)}</div></div>`;
       });
       html += `</div>`;
     }
