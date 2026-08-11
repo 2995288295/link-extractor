@@ -2,6 +2,11 @@
 
 本项目的所有重要变更均记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.4] - 2026-08-11
+
+### 修复
+- **复制按钮文字单字折行**：「复制链接/复制文案」按钮在较窄容器下文字被压缩成单字换行。`.copy-row .btn` 增加 `white-space: nowrap` 禁止折行，最小宽度 110px → 120px（容纳 emoji + 4 字完整文字）
+
 ## [v1.4.3] - 2026-08-11
 
 ### 新增

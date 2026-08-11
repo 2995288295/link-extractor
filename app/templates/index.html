@@ -146,7 +146,7 @@ textarea:focus { border-color: var(--primary); }
 .field-value.empty { color: var(--text2); font-style: italic; }
 
 .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-.copy-row .btn { flex: 1; min-width: 110px; }
+.copy-row .btn { flex: 1; min-width: 120px; white-space: nowrap; }
 .btn-copy { background: var(--primary); color: #fff; }
 .btn-copy:hover:not(:disabled) { background: var(--primary-hover); }
 .btn-copy.copied { background: var(--success); }
@@ -343,7 +343,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.3</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.4</div>
     <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="clearAccessToken()">🔑 清除口令 / 退出</button>
   </footer>
 </div>
