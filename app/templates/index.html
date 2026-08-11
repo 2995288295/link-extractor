@@ -141,8 +141,33 @@ textarea:focus { border-color: var(--primary); }
   word-break: break-all;
   white-space: pre-wrap;
 }
-.field-value.link { color: var(--primary); }
-.field-value.caption { max-height: 160px; overflow-y: auto; }
+.field-value.link {
+  color: var(--primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: keep-all;
+}
+.field-value.caption {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.field-value.caption.expanded { -webkit-line-clamp: unset; }
+.caption-wrap { position: relative; }
+.caption-toggle {
+  display: none;
+  margin-top: 6px;
+  padding: 2px 12px;
+  font-size: 12px;
+  color: var(--primary);
+  background: #f7f8fa;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.caption-wrap.show-toggle .caption-toggle { display: block; margin-left: auto; }
 .field-value.empty { color: var(--text2); font-style: italic; }
 
 .copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
@@ -343,7 +368,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.4</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.5</div>
     <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="clearAccessToken()">🔑 清除口令 / 退出</button>
   </footer>
 </div>
@@ -675,6 +700,7 @@ async function doExtract(isAuto = false) {
           item.className = "result-item";
           item.innerHTML = resultCardHtml(r, appended - 1);
           box.appendChild(item);
+          initCaptionToggles(item);
           status.textContent = `正在提取...（完成 ${appended}/${urls.length}，成功 ${okCount}，失败 ${failCount}）`;
         } else if (msg.type === "end") {
           // 结束帧
@@ -735,11 +761,14 @@ function resultCardHtml(r, i) {
         <div class="result-content">
       <div class="field">
         <div class="field-label">转换链接（推荐复制）</div>
-        <div class="field-value link">${esc(r.canonical_url)}</div>
+        <div class="field-value link" title="${esc(r.canonical_url)}">${esc(r.canonical_url)}</div>
       </div>
       <div class="field">
         <div class="field-label">文案</div>
-        <div class="field-value caption ${r.caption ? "" : "empty"}">${esc(r.caption) || "（无文案）"}</div>
+        <div class="caption-wrap">
+          <div class="field-value caption">${esc(r.caption) || "（无文案）"}</div>
+          <button class="caption-toggle" type="button" onclick="toggleCaption(this)">展开全部 ▼</button>
+        </div>
       </div>
       <div class="copy-row">
         <button class="btn btn-copy" onclick="copyText(unescapeHtml(this.parentNode.previousElementSibling.previousElementSibling.querySelector('.field-value').innerText), this)" data-kind="canonical">📋 复制链接</button>
@@ -767,7 +796,7 @@ function resultCardHtml(r, i) {
     html += `
       <div class="field">
         <div class="field-label">原始链接</div>
-        <div class="field-value link">${esc(r.original_url)}</div>
+        <div class="field-value link" title="${esc(r.original_url)}">${esc(r.original_url)}</div>
       </div>
       <div class="field">
         <div class="field-label">错误信息</div>
@@ -781,6 +810,24 @@ function resultCardHtml(r, i) {
   return html;
 }
 
+/** 初始化容器内所有文案折叠：内容超过 3 行时显示「展开全部」按钮 */
+function initCaptionToggles(container) {
+  container.querySelectorAll(".caption-wrap").forEach((wrap) => {
+    const cap = wrap.querySelector(".caption");
+    if (cap && cap.scrollHeight > cap.clientHeight + 2) {
+      wrap.classList.add("show-toggle");
+    }
+  });
+}
+
+/** 展开/收起文案 */
+function toggleCaption(btn) {
+  const wrap = btn.closest(".caption-wrap");
+  const cap = wrap.querySelector(".caption");
+  const expanded = cap.classList.toggle("expanded");
+  btn.textContent = expanded ? "收起 ▲" : "展开全部 ▼";
+}
+
 function renderResults(results) {
   const box = document.getElementById("results");
   box.innerHTML = "";
@@ -791,6 +838,7 @@ function renderResults(results) {
     item.innerHTML = resultCardHtml(r, i);
     box.appendChild(item);
   });
+  initCaptionToggles(box);
 }
 
 function unescapeHtml(s) {
@@ -894,6 +942,7 @@ function renderSingleResult(r, index) {
   const item = document.createElement("div");
   item.className = "result-item";
   item.innerHTML = resultCardHtml(r, index);
+  initCaptionToggles(item);
   return item;
 }
 
@@ -1009,9 +1058,9 @@ async function loadHistory() {
           ? `
             <div class="field" style="margin-top:8px;">
               <div class="field-label">转换链接</div>
-              <div class="field-value link">${esc(h.canonical_url || h.original_url)}</div>
+              <div class="field-value link" title="${esc(h.canonical_url || h.original_url)}">${esc(h.canonical_url || h.original_url)}</div>
             </div>
-            ${h.caption ? `<div class="field"><div class="field-label">文案</div><div class="field-value caption">${esc(h.caption)}</div></div>` : ""}
+            ${h.caption ? `<div class="field"><div class="field-label">文案</div><div class="caption-wrap"><div class="field-value caption">${esc(h.caption)}</div><button class="caption-toggle" type="button" onclick="toggleCaption(this)">展开全部 ▼</button></div></div>` : ""}
             <div class="copy-row">
               <button class="btn btn-sm btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.link').innerText, this)">复制链接</button>
               ${h.caption ? `<button class="btn btn-sm btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.caption').innerText, this)">复制文案</button>` : ""}
@@ -1019,11 +1068,12 @@ async function loadHistory() {
           : `
             <div class="field" style="margin-top:8px;">
               <div class="field-label">原始链接</div>
-              <div class="field-value link">${esc(h.original_url)}</div>
+              <div class="field-value link" title="${esc(h.original_url)}">${esc(h.original_url)}</div>
             </div>
             <div class="field"><div class="field-label">错误</div><div class="field-value" style="color:var(--error);">${esc(h.error)}</div></div>`}
       </div>
     `).join("");
+    initCaptionToggles(list);
   } catch (e) {
     status.textContent = "加载历史失败";
   }
