@@ -2,7 +2,7 @@
 
 粘贴抖音/小红书分享链接 → 批量提取**转换链接 + 文案** → 逐条独立复制。轻量 Web 工具，纯 Python + requests，无浏览器依赖，适合低内存服务器。
 
-**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.5
+**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.6
 **版权说明**：本工具免费开源，任何人可自由使用/修改/分发，但请保留页面底部及本文档的作者信息。
 
 ## 项目概述
@@ -74,17 +74,17 @@ PORT=8080 python app.py
 
 | 环境变量 | 必填 | 说明 |
 |---------|------|------|
-| `ACCESS_TOKEN` | 部署时必须 | 访问口令。设置后所有 API 需携带 `X-Access-Token` 头；未设置则跳过校验（本地开发用）。**给朋友分享前务必设置** |
+| `ACCESS_TOKEN` | 可选 | 访问口令（默认**不启用**，打开即用）。设置后所有 API 需携带 `X-Access-Token` 头，前端会弹出口令输入框；不设置则完全开放 |
 | `DEVICE_SECRET` | 推荐 | 设备签名密钥。用于防伪造 device_id（历史越权）；未设置自动生成临时密钥（重启后设备失效） |
 | `RATE_IP_PER_MINUTE` | 可选 | 每 IP 每分钟请求上限，默认 20 |
 | `RATE_DEVICE_PER_MINUTE` | 可选 | 每设备每分钟请求上限，默认 15 |
 
-示例（Linux 部署）：
-```bash
-ACCESS_TOKEN="你的私人口令" DEVICE_SECRET="一串随机字符" ./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
-```
+> **口令模块说明（v1.4.6 起）**：默认隐藏不启用——部署时不设置 `ACCESS_TOKEN`，任何人可直接使用。若以后想恢复访问限制，只需设置 `ACCESS_TOKEN` 环境变量重启服务即可（前端会自动弹出输入框，无需改代码）。
 
-> 前端首次访问会弹出口令输入框，输入后保存在浏览器 localStorage；页脚有「清除口令/退出」按钮。
+示例（Linux 部署，无口令模式）：
+```bash
+DEVICE_SECRET="一串随机字符" ./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
+```
 
 ## 部署到服务器（Debian 12 / OpenCloudOS 已验证）
 
@@ -98,7 +98,7 @@ ACCESS_TOKEN="你的私人口令" DEVICE_SECRET="一串随机字符" ./venv/bin/
 #     Port 443
 #     User git
 
-ACCESS_TOKEN="你的口令" DEVICE_SECRET="随机串" \
+DEVICE_SECRET="随机串" \
 GIT_REPO="git@github.com:2995288295/link-extractor.git" \
 sudo bash deploy.sh
 ```
