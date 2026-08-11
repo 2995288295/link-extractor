@@ -27,7 +27,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urljoin as _urljoin
+from urllib.parse import urlparse as _urlparse
 
+import requests as _requests
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from lib.extractor import extract_link
@@ -207,10 +210,12 @@ def _device_cookie_payload(device_id: str, signature: str):
 RATE_IP_PER_MINUTE = int(os.environ.get("RATE_IP_PER_MINUTE", "20"))      # 每 IP 每分钟
 RATE_DEVICE_PER_MINUTE = int(os.environ.get("RATE_DEVICE_PER_MINUTE", "15"))  # 每设备每分钟
 _RATE_WINDOW = 60  # 秒
+_rate_write_count = 0  # 限速写计数，用于周期性清理过期桶
 
 
 def _check_rate_limit(bucket_key: str, limit: int) -> bool:
     """SQLite 持久化的滑动窗口限速；超限返回 False。"""
+    global _rate_write_count
     now = time.time()
     cutoff = now - _RATE_WINDOW
     conn = _get_db()
@@ -231,8 +236,9 @@ def _check_rate_limit(bucket_key: str, limit: int) -> bool:
             "INSERT OR REPLACE INTO rate_limits (bucket_key, timestamps, updated_at) VALUES (?,?,?)",
             (bucket_key, json.dumps(timestamps), now),
         )
-        # 定期清理过期桶（防止表无限增长；每 ~100 次写触发一次）
-        if int(now) % 100 == 0:
+        # 定期清理过期桶（防止表无限增长；每 ~100 次写入触发一次）
+        _rate_write_count += 1
+        if _rate_write_count % 100 == 0:
             conn.execute("DELETE FROM rate_limits WHERE updated_at < ?", (now - 3600,))
         conn.commit()
         return True
@@ -526,15 +532,11 @@ def api_stats():
 
 # ---------------------------------------------------------------- 封面代理
 
-import requests as _requests
-from urllib.parse import urljoin as _urljoin
-from urllib.parse import urlparse as _urlparse
-
 _cover_cache: dict[str, tuple[bytes, str, float]] = {}
 COVER_CACHE_SECONDS = 60 * 60 * 24  # 封面缓存 24 小时
 _ALLOWED_IMAGE_HOSTS = (
     "douyinpic.com", "douyinimg.com", "douyinvod.com",
-    "xhscdn.com", "xiaohongshu.com", "sns-img", "cn-hangzhou",
+    "xhscdn.com", "xiaohongshu.com",
     "xhslink.com",
 )
 
@@ -616,8 +618,10 @@ def api_cover():
             return "fetch failed", 502
         ctype = r.headers.get("Content-Type", "image/jpeg").split(";")[0]
         _cover_cache[url] = (r.content, ctype, now)
-        if len(_cover_cache) > 300:  # 防内存膨胀
-            _cover_cache.clear()
+        if len(_cover_cache) > 300:  # 防内存膨胀：淘汰最旧的一半（保留热数据）
+            _stale = sorted(_cover_cache.items(), key=lambda kv: kv[1][2])[: len(_cover_cache) // 2]
+            for k, _v in _stale:
+                _cover_cache.pop(k, None)
         resp = app.response_class(r.content, mimetype=ctype)
         resp.headers["Cache-Control"] = "public, max-age=86400"
         return resp

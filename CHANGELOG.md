@@ -2,6 +2,24 @@
 
 本项目的所有重要变更均记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.4.3] - 2026-08-11
+
+### 新增
+- **deploy.sh 适配 RHEL 系服务器（重要）**：自动识别发行版——Debian/Ubuntu 用 `www-data` 用户，OpenCloudOS/CentOS/Rocky 等 RHEL 系用 `root`（原脚本在 RHEL 系会因无 www-data 用户导致 systemd 启动失败）；防火墙提示按 firewalld/ufw 区分
+- **deploy.sh 支持 git 拉取部署**：新增 `GIT_REPO` 环境变量，服务器上一条命令完成 clone + 部署（国内服务器可走 SSH 443 通道），后续 `git pull` 即可更新
+
+### 优化
+- **gunicorn `--timeout` 60 → 120**：抖音提取最长链路（请求+风控重试）可能超 60 秒，提高超时避免 worker 被误杀
+- **封面代理缓存淘汰**：超限时由「清空全部」改为「淘汰最旧的一半」，保留热数据减少回源
+- **限速桶清理触发**：由依赖时间戳巧合（`int(now) % 100`）改为独立写计数，清理时机稳定可靠
+- **封面白名单清理**：移除匹配不到真实域名的无效条目 `sns-img`、`cn-hangzhou`
+- **代码规范**：app.py 中部 import 统一移到文件顶部
+
+### 文档
+- README 限速描述统一为每 IP 20 次/分钟（原功能列表误写 30）
+- README 部署示例统一为单 worker + timeout 120（低内存服务器 + SQLite 跨进程一致性）
+- README 补充 git 拉取部署方式与 RHEL 系说明
+
 ## [v1.4.2] - 2026-07-31
 
 ### 优化

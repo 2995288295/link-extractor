@@ -2,7 +2,7 @@
 
 粘贴抖音/小红书分享链接 → 批量提取**转换链接 + 文案** → 逐条独立复制。轻量 Web 工具，纯 Python + requests，无浏览器依赖，适合低内存服务器。
 
-**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4
+**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.3
 **版权说明**：本工具免费开源，任何人可自由使用/修改/分发，但请保留页面底部及本文档的作者信息。
 
 ## 项目概述
@@ -30,7 +30,7 @@
 - 🕐 历史记录：服务端 SQLite 存储 + **设备 ID 隔离**（每人只能看到自己的记录）
 - 📊 统计看板：总数/成功率/平台分布/近 7 天趋势（SVG 折线图）
 - 📱 移动端：响应式适配 + PWA 添加到主屏（HTTPS 下完整生效）
-- 🛡️ 安全：SSRF 防护（域名白名单 + 内网 IP 拦截）、速率限制（每 IP 30 次/分钟）
+- 🛡️ 安全：SSRF 防护（域名白名单 + 内网 IP 拦截）、速率限制（每 IP 20 次/分钟）
 
 > 完整变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -81,15 +81,29 @@ PORT=8080 python app.py
 
 示例（Linux 部署）：
 ```bash
-ACCESS_TOKEN="你的私人口令" DEVICE_SECRET="一串随机字符" ./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 60
+ACCESS_TOKEN="你的私人口令" DEVICE_SECRET="一串随机字符" ./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
 ```
 
 > 前端首次访问会弹出口令输入框，输入后保存在浏览器 localStorage；页脚有「清除口令/退出」按钮。
 
-## 部署到服务器（Debian 12 已验证环境）
+## 部署到服务器（Debian 12 / OpenCloudOS 已验证）
 
 服务器要求：Python 3.10+，无需 Docker，无需 Node.js。
 
+**方式一：git 拉取部署（推荐，后续更新 `git pull` 即可）**
+```bash
+# 国内服务器访问 GitHub 需先配置 SSH 443 通道（~/.ssh/config）：
+#   Host github.com
+#     HostName ssh.github.com
+#     Port 443
+#     User git
+
+ACCESS_TOKEN="你的口令" DEVICE_SECRET="随机串" \
+GIT_REPO="git@github.com:2995288295/link-extractor.git" \
+sudo bash deploy.sh
+```
+
+**方式二：上传代码后部署**
 ```bash
 # 1. 上传项目到服务器（例：/opt/link-extractor/）
 # 2. 创建虚拟环境并安装
@@ -97,8 +111,8 @@ cd /opt/link-extractor
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# 3. 用 gunicorn 启动（2 个 worker，适配低内存可改 1）
-./venv/bin/gunicorn -w 2 -b 0.0.0.0:5003 app:app --timeout 60
+# 3. 用 gunicorn 启动（单 worker：SQLite 限速/缓存跨进程共享，低内存服务器推荐）
+./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
 
 # 4. 配置 systemd 常驻（可选，推荐）
 sudo tee /etc/systemd/system/link-extractor.service > /dev/null <<'EOF'
@@ -108,10 +122,10 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/link-extractor
-ExecStart=/opt/link-extractor/venv/bin/gunicorn -w 2 -b 0.0.0.0:5003 app:app --timeout 60
+ExecStart=/opt/link-extractor/venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
 Restart=always
 RestartSec=3
-User=www-data
+User=root
 
 [Install]
 WantedBy=multi-user.target
@@ -121,6 +135,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now link-extractor
 sudo systemctl status link-extractor
 ```
+
+> 注：`deploy.sh` 会自动识别发行版——Debian/Ubuntu 用 `www-data` 用户，OpenCloudOS/CentOS 等 RHEL 系用 `root`（无 www-data 用户）。
 
 ## 防火墙
 
@@ -137,7 +153,7 @@ sudo ufw allow 5003/tcp
 
 ## 注意事项
 
-1. **反爬风险**：在线部署后抖音/小红书看到的是数据中心 IP，提取成功率可能低于本机；若频繁失败，建议限制使用频率（已内置每 IP 30 次/分钟）
+1. **反爬风险**：在线部署后抖音/小红书看到的是数据中心 IP，提取成功率可能低于本机；若频繁失败，建议限制使用频率（已内置每 IP 20 次/分钟）
 2. **小红书必须带 xsec_token**：请用小红书 App「复制链接」功能获取分享链接（含 xsec_token 参数），否则无法提取
 3. **合规**：仅用于个人内容整理，请勿高频批量抓取
 4. **抖音稳定性**：依赖 iesdouyin 分享页公开数据，若平台改版需跟进适配
