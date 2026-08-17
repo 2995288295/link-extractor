@@ -2,7 +2,7 @@
 
 粘贴抖音/小红书分享链接 → 批量提取**转换链接 + 文案** → 逐条独立复制。轻量 Web 工具，纯 Python + requests，无浏览器依赖，适合低内存服务器。
 
-**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.1
+**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.2
 **版权说明**：本工具免费开源，任何人可自由使用/修改/分发，但请保留页面底部及本文档的作者信息。
 
 ## 项目概述
@@ -143,13 +143,26 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-
 sudo systemctl daemon-reload
 sudo systemctl enable --now link-extractor
 sudo systemctl status link-extractor
 ```
 
 > 注：`deploy.sh` 会自动识别发行版——Debian/Ubuntu 用 `www-data` 用户，OpenCloudOS/CentOS 等 RHEL 系用 `root`（无 www-data 用户）。
+
+## 本机健康兜底（推荐）
+
+`ops/` 提供 systemd 健康检查：每分钟请求一次本机 `/api/health`；连续两次失败才重启服务，避免单次波动造成不必要的重启。该机制不依赖第三方服务，也不会产生额外费用。
+
+```bash
+sudo install -m 755 ops/link-extractor-healthcheck.sh /usr/local/sbin/link-extractor-healthcheck
+sudo install -m 644 ops/link-extractor-healthcheck.service /etc/systemd/system/
+sudo install -m 644 ops/link-extractor-healthcheck.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now link-extractor-healthcheck.timer
+```
+
+检查状态：`systemctl list-timers link-extractor-healthcheck.timer`。检查失败和自动重启记录在 `journalctl -t link-extractor-healthcheck`。该机制仅做本机自动恢复；如需手机/短信告警，应另接外部监控服务。
 
 ## 防火墙
 

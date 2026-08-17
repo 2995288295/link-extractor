@@ -1,0 +1,7 @@
+[Unit]
+Description=Link Extractor local health check
+After=link-extractor.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/link-extractor-healthcheck
