@@ -14,4 +14,8 @@ with sqlite3.connect(db_path, timeout=15) as conn:
     conn.execute("DELETE FROM rate_limits WHERE updated_at < ?", (now - 3600,))
     conn.execute("DELETE FROM extract_cache WHERE expires_at < ?", (now,))
     conn.execute("PRAGMA optimize")
-    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    try:
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
+    except sqlite3.OperationalError:
+        # 服务繁忙时跳过检查点；下一次定时维护会再次尝试。
+        pass
