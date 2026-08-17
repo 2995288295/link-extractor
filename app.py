@@ -68,6 +68,7 @@ def _load_device_secret() -> str:
 
 
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 DEVICE_SECRET = _load_device_secret()
 
 # ---------------------------------------------------------------- 日志
@@ -128,6 +129,24 @@ def _check_access_token():
     return None
 
 
+@app.before_request
+def _check_admin_token():
+    """管理员接口鉴权：环境变量 ADMIN_TOKEN 设置后生效（未设置则管理接口不可用）。
+
+    - 仅作用于 /api/admin/*，与普通访问口令完全隔离
+    - 校验请求头 X-Admin-Token，hmac.compare_digest 防时序攻击
+    - 未设置 ADMIN_TOKEN 时返回 503，提示配置（避免无鉴权裸奔）
+    """
+    if not request.path.startswith("/api/admin/"):
+        return None
+    if not ADMIN_TOKEN:
+        return jsonify({"success": False, "error": "管理员口令未配置"}), 503
+    provided = request.headers.get("X-Admin-Token", "")
+    if not provided or not hmac.compare_digest(provided, ADMIN_TOKEN):
+        return jsonify({"success": False, "error": "管理员口令错误或未提供"}), 401
+    return None
+
+
 @app.after_request
 def _log_request_end(response):
     if request.path.startswith("/api/"):
@@ -181,6 +200,9 @@ def _init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_history_device ON history(device_id, created_at)")
+    # 管理看板全局聚合查询加速
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_history_status ON history(status)")
     conn.commit()
     conn.close()
 
@@ -561,6 +583,163 @@ def api_stats():
     return jsonify(resp)
 
 
+# ---------------------------------------------------------------- 后台运营看板（管理员）
+
+def _admin_require_rate(ip: str) -> bool:
+    """管理员接口独立限速（每 IP 每分钟 30 次，看板轮询够用）。"""
+    return _check_rate_limit(f"admin:{ip}", 30)
+
+
+@app.route("/api/admin/overview", methods=["GET"])
+def api_admin_overview():
+    """总览：总数/成功率/活跃设备/今日提取/近7天趋势/平台分布（全设备，管理员视角）。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    conn = _get_db()
+    total = conn.execute("SELECT COUNT(*) c FROM history").fetchone()["c"]
+    ok_count = conn.execute("SELECT COUNT(*) c FROM history WHERE status = 'success'").fetchone()["c"]
+    fail_count = total - ok_count
+    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history").fetchone()["c"]
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_count = conn.execute(
+        "SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (today_str + "%",)
+    ).fetchone()["c"]
+
+    platform_rows = conn.execute(
+        "SELECT platform, COUNT(*) c FROM history WHERE status = 'success' GROUP BY platform"
+    ).fetchall()
+    platform_dist = {}
+    for row in platform_rows:
+        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
+        platform_dist[name] = platform_dist.get(name, 0) + row["c"]
+
+    trend = []
+    today = datetime.now()
+    for i in range(6, -1, -1):
+        day = today - timedelta(days=i)
+        day_str = day.strftime("%Y-%m-%d")
+        cnt = conn.execute(
+            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (day_str + "%",)
+        ).fetchone()["c"]
+        ok_cnt = conn.execute(
+            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND status = 'success'",
+            (day_str + "%",),
+        ).fetchone()["c"]
+        trend.append({
+            "date": day.strftime("%m-%d"),
+            "count": cnt,
+            "ok": ok_cnt,
+        })
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "total": total,
+        "ok": ok_count,
+        "fail": fail_count,
+        "success_rate": round(ok_count / total * 100, 1) if total else 0,
+        "active_devices": active_devices,
+        "today_count": today_count,
+        "platform_dist": platform_dist,
+        "trend": trend,
+    })
+
+
+@app.route("/api/admin/devices", methods=["GET"])
+def api_admin_devices():
+    """设备使用排行：提取数/成功率/首次与最后活跃（device_id 脱敏为前后缀）。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    conn = _get_db()
+    rows = conn.execute(
+        """
+        SELECT device_id,
+               COUNT(*) AS total,
+               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS ok,
+               MIN(created_at) AS first_at,
+               MAX(created_at) AS last_at
+        FROM history
+        GROUP BY device_id
+        ORDER BY total DESC
+        LIMIT 100
+        """
+    ).fetchall()
+    conn.close()
+
+    def _mask(did: str) -> str:
+        if not did:
+            return "未知"
+        if len(did) <= 12:
+            return did
+        return f"{did[:4]}…{did[-4:]}"
+
+    devices = []
+    for r in rows:
+        total = r["total"]
+        ok = r["ok"] or 0
+        devices.append({
+            "device_id": _mask(r["device_id"]),
+            "total": total,
+            "ok": ok,
+            "fail": total - ok,
+            "success_rate": round(ok / total * 100, 1) if total else 0,
+            "first_at": r["first_at"],
+            "last_at": r["last_at"],
+        })
+    return jsonify({"success": True, "devices": devices})
+
+
+@app.route("/api/admin/errors", methods=["GET"])
+def api_admin_errors():
+    """失败原因聚合：error 文本分组计数 TOP 30（不含具体链接内容）。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    conn = _get_db()
+    rows = conn.execute(
+        """
+        SELECT error, COUNT(*) c FROM history
+        WHERE status != 'success' AND error != ''
+        GROUP BY error ORDER BY c DESC LIMIT 30
+        """
+    ).fetchall()
+    conn.close()
+    errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
+    return jsonify({"success": True, "errors": errors})
+
+
+@app.route("/api/admin/recent", methods=["GET"])
+def api_admin_recent():
+    """最近动态（脱敏）：仅平台/状态/时间/错误摘要，不返回任何 URL 与文案。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    conn = _get_db()
+    rows = conn.execute(
+        """
+        SELECT platform, status, error, created_at FROM history
+        ORDER BY id DESC LIMIT 50
+        """
+    ).fetchall()
+    conn.close()
+    items = []
+    for r in rows:
+        items.append({
+            "platform": r["platform"],
+            "status": r["status"],
+            "error": (r["error"] or "")[:120],
+            "created_at": r["created_at"],
+        })
+    return jsonify({"success": True, "items": items})
+
+
 # ---------------------------------------------------------------- 封面代理
 
 _cover_cache: dict[str, tuple[bytes, str, float]] = {}
@@ -665,6 +844,12 @@ def api_cover():
 @app.route("/")
 def index():
     return send_from_directory("app/templates", "index.html")
+
+
+@app.route("/admin")
+def admin_page():
+    """后台运营看板页面（鉴权由前端 + /api/admin/* 双重保障）。"""
+    return send_from_directory("app/templates", "admin.html")
 
 
 @app.route("/favicon.ico")

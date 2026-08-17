@@ -2,6 +2,15 @@
 
 本项目的所有重要变更均记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.5.0] - 2026-08-17
+
+### 新增
+- **后台运营看板（管理员）**：
+  - 独立页面 `/admin` + 独立管理员口令 `ADMIN_TOKEN`（环境变量），与普通访问完全隔离；未配置时管理接口返回 503 防裸奔
+  - 4 个聚合接口（均含 IP 限速）：`/api/admin/overview`（总提取/成功率/活跃设备/今日/近7天趋势/平台分布）、`/api/admin/devices`（设备排行，ID 脱敏）、`/api/admin/errors`（失败原因 TOP）、`/api/admin/recent`（最近动态，不含任何 URL/文案）
+  - 数据脱敏：设备 ID 只显示前后 4 位，最近动态不返回原始链接与文案，保护使用者隐私
+  - history 表新增 `created_at`、`status` 索引（全局聚合加速）
+
 ## [v1.4.8] - 2026-08-17
 
 ### 修复
