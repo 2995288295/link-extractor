@@ -12,6 +12,15 @@ set -e
 APP_DIR="${APP_DIR:-/opt/link-extractor}"
 SERVICE_NAME="link-extractor"
 PORT="${PORT:-5003}"
+WEB_CONCURRENCY="${WEB_CONCURRENCY:-2}"
+GUNICORN_THREADS="${GUNICORN_THREADS:-2}"
+
+case "$WEB_CONCURRENCY" in
+    ''|*[!0-9]*) WEB_CONCURRENCY=2 ;;
+esac
+case "$GUNICORN_THREADS" in
+    ''|*[!0-9]*) GUNICORN_THREADS=2 ;;
+esac
 
 echo "=============================================="
 echo " 链接提取工具部署"
@@ -115,7 +124,7 @@ After=network.target
 WorkingDirectory=$APP_DIR
 Environment=ACCESS_TOKEN=${ACCESS_TOKEN:-}
 Environment=DEVICE_SECRET=${DEVICE_SECRET:-}
-ExecStart=$APP_DIR/venv/bin/gunicorn -w 1 -b 0.0.0.0:${PORT} app:app --timeout 120
+ExecStart=$APP_DIR/venv/bin/gunicorn -w ${WEB_CONCURRENCY} --worker-class gthread --threads ${GUNICORN_THREADS} -b 0.0.0.0:${PORT} app:app --timeout 120
 Restart=always
 RestartSec=3
 User=${SERVICE_USER}

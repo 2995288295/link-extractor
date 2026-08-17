@@ -71,6 +71,19 @@ ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 DEVICE_SECRET = _load_device_secret()
 
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    """读取受限整数环境变量，避免错误配置耗尽线程或触发平台风控。"""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, min(value, maximum))
+
+
+# 每个批次的外部平台请求并发数。默认 3，兼顾批量速度与平台风控风险。
+EXTRACT_CONCURRENCY = _bounded_int_env("EXTRACT_CONCURRENCY", 3, 1, 5)
+
 # ---------------------------------------------------------------- 日志
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -415,6 +428,7 @@ def api_extract():
 
     def _process_one(url: str) -> dict:
         """提取单条链接（带随机抖动，避免节奏规律触发风控）。"""
+        started_at = time.monotonic()
         time.sleep(random.uniform(0, 0.5))
         result = extract_link(url)
         item = {
@@ -435,24 +449,27 @@ def api_extract():
             "hint": result.hint,
         }
         # 日志
+        elapsed_ms = (time.monotonic() - started_at) * 1000
         if result.success:
-            log.info("提取成功 [%s] %s -> %s (作者:%s 点赞:%d)",
+            log.info("提取成功 [%s] %s -> %s (作者:%s 点赞:%d 耗时:%.0fms)",
                      result.platform, url[:60], result.canonical_url,
-                     result.author_name or "-", result.like_count)
+                     result.author_name or "-", result.like_count, elapsed_ms)
         else:
-            log.warning("提取失败 [%s] 错误:%s", url[:60], result.error)
+            log.warning("提取失败 [%s] 错误:%s (耗时:%.0fms)", url[:60], result.error, elapsed_ms)
         # 入库
         _save_to_db(item)
         return item
 
     def _stream():
         """并发提取，每条完成立即 yield（ndjson），前端逐条渲染。"""
+        batch_started_at = time.monotonic()
         # 先发头帧（携带设备标识，前端保存）
         payload = {"type": "start", "total": len(urls)}
         payload.update(_device_cookie_payload(device_id, device_sig))
         yield json.dumps(payload, ensure_ascii=False) + "\n"
         done = 0
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        success_count = 0
+        with ThreadPoolExecutor(max_workers=EXTRACT_CONCURRENCY) as pool:
             futures = {pool.submit(_process_one, u): (source_index, u) for source_index, u in enumerate(urls)}
             for fut in as_completed(futures):
                 source_index, url = futures[fut]
@@ -467,6 +484,7 @@ def api_extract():
                         "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
                     }
                 done += 1
+                success_count += int(item["success"])
                 yield json.dumps(
                     {"type": "item", "index": done, "source_index": source_index, "data": item},
                     ensure_ascii=False,
@@ -486,6 +504,11 @@ def api_extract():
             c.close()
         except Exception:
             pass
+        log.info(
+            "批量提取完成: total=%d success=%d concurrency=%d elapsed=%.0fms",
+            len(urls), success_count, EXTRACT_CONCURRENCY,
+            (time.monotonic() - batch_started_at) * 1000,
+        )
         yield json.dumps({"type": "end", "done": done}, ensure_ascii=False) + "\n"
 
     return Response(

@@ -2,7 +2,7 @@
 
 粘贴抖音/小红书分享链接 → 批量提取**转换链接 + 文案** → 逐条独立复制。轻量 Web 工具，纯 Python + requests，无浏览器依赖，适合低内存服务器。
 
-**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.0
+**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.1
 **版权说明**：本工具免费开源，任何人可自由使用/修改/分发，但请保留页面底部及本文档的作者信息。
 
 ## 项目概述
@@ -79,12 +79,13 @@ PORT=8080 python app.py
 | `DEVICE_SECRET` | 推荐 | 设备签名密钥。用于防伪造 device_id（历史越权）；未设置自动生成临时密钥（重启后设备失效） |
 | `RATE_IP_PER_MINUTE` | 可选 | 每 IP 每分钟请求上限，默认 20 |
 | `RATE_DEVICE_PER_MINUTE` | 可选 | 每设备每分钟请求上限，默认 15 |
+| `EXTRACT_CONCURRENCY` | 可选 | 单个批次的提取并发数，默认 3，范围 1-5 |
 
 > **口令模块说明（v1.4.6 起）**：默认隐藏不启用——部署时不设置 `ACCESS_TOKEN`，任何人可直接使用。若以后想恢复访问限制，只需设置 `ACCESS_TOKEN` 环境变量重启服务即可（前端会自动弹出输入框，无需改代码）。
 
 示例（Linux 部署，无口令模式 + 运营看板）：
 ```bash
-DEVICE_SECRET="一串随机字符" ADMIN_TOKEN="你的管理员口令" ./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
+DEVICE_SECRET="一串随机字符" ADMIN_TOKEN="你的管理员口令" ./venv/bin/gunicorn -w 2 --worker-class gthread --threads 2 -b 0.0.0.0:5003 app:app --timeout 120
 ```
 
 ## 后台运营看板（v1.5.0+）
@@ -123,8 +124,8 @@ cd /opt/link-extractor
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
-# 3. 用 gunicorn 启动（单 worker：SQLite 限速/缓存跨进程共享，低内存服务器推荐）
-./venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
+# 3. 用 gunicorn 启动（2 worker x 2 threads，同时服务多个提取请求）
+./venv/bin/gunicorn -w 2 --worker-class gthread --threads 2 -b 0.0.0.0:5003 app:app --timeout 120
 
 # 4. 配置 systemd 常驻（可选，推荐）
 sudo tee /etc/systemd/system/link-extractor.service > /dev/null <<'EOF'
@@ -134,7 +135,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/link-extractor
-ExecStart=/opt/link-extractor/venv/bin/gunicorn -w 1 -b 0.0.0.0:5003 app:app --timeout 120
+ExecStart=/opt/link-extractor/venv/bin/gunicorn -w 2 --worker-class gthread --threads 2 -b 0.0.0.0:5003 app:app --timeout 120
 Restart=always
 RestartSec=3
 User=root
