@@ -13,39 +13,43 @@
 <title>链接提取工具</title>
 <style>
 :root {
-  --bg: #f5f6f8;
+  --bg: #f3f6fa;
   --card: #ffffff;
-  --border: #e3e6ea;
-  --text: #1f2329;
-  --text2: #646a73;
-  --primary: #3a7afe;
-  --primary-hover: #2f6ae0;
-  --success: #16a34a;
-  --error: #dc2626;
-  --radius: 10px;
+  --border: #dbe3ee;
+  --text: #16263b;
+  --text2: #52657a;
+  --primary: #1769e0;
+  --primary-hover: #1256ba;
+  --primary-soft: #e8f0fe;
+  --success: #137a4a;
+  --error: #ba2b3d;
+  --radius: 12px;
+  --shadow: 0 10px 28px rgba(22, 38, 59, .06);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  background: var(--bg);
+  background: linear-gradient(180deg, #edf3fb 0, var(--bg) 280px);
   color: var(--text);
   line-height: 1.6;
 }
-.container { max-width: 860px; margin: 0 auto; padding: 24px 16px 80px; }
+.container { max-width: 860px; margin: 0 auto; padding: 24px 16px 96px; }
 
-header { text-align: center; padding: 28px 0 20px; }
-header h1 { font-size: 24px; font-weight: 700; }
-header p { color: var(--text2); font-size: 14px; margin-top: 6px; }
+header { text-align: center; padding: 30px 0 22px; }
+.eyebrow { color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: .14em; }
+header h1 { font-size: 27px; font-weight: 750; letter-spacing: -.04em; margin-top: 4px; }
+header p { color: var(--text2); font-size: 14px; margin: 7px auto 0; max-width: 560px; }
 
 .card {
   background: var(--card);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(219, 227, 238, .95);
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
+  box-shadow: var(--shadow);
 }
-.card h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+.card h2, .input-label { display: block; font-size: 16px; font-weight: 650; margin-bottom: 12px; }
 
 textarea {
   width: 100%;
@@ -59,7 +63,7 @@ textarea {
   outline: none;
   transition: border-color .15s;
 }
-textarea:focus { border-color: var(--primary); }
+textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23, 105, 224, .14); }
 
 .toolbar { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .btn {
@@ -69,13 +73,15 @@ textarea:focus { border-color: var(--primary); }
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: background .15s, opacity .15s;
+  transition: background .15s, opacity .15s, transform .15s;
 }
+.btn:focus-visible, .tab:focus-visible, .cover-button:focus-visible, .caption-toggle:focus-visible, .preview-close:focus-visible { outline: 3px solid rgba(23, 105, 224, .32); outline-offset: 2px; }
+.btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn-primary { background: var(--primary); color: #fff; }
 .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-.btn-ghost { background: #eef1f5; color: var(--text); }
-.btn-ghost:hover { background: #e2e6ec; }
+.btn-ghost { background: #edf2f8; color: var(--text); }
+.btn-ghost:hover { background: #e2e9f2; }
 .btn-danger { background: #fdecec; color: var(--error); }
 .btn-danger:hover { background: #fadcdc; }
 .btn-danger.confirming { background: var(--error); color: #fff; }
@@ -102,6 +108,7 @@ textarea:focus { border-color: var(--primary); }
   padding: 16px;
   margin-bottom: 12px;
   animation: fadeIn .25s ease;
+  box-shadow: var(--shadow);
 }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
@@ -119,14 +126,29 @@ textarea:focus { border-color: var(--primary); }
 .badge-ok { background: #e8f7ee; color: var(--success); }
 .badge-fail { background: #fdecec; color: var(--error); }
 
-.result-main { display: flex; gap: 12px; }
+.result-main { display: flex; gap: 14px; }
 .cover-wrap { flex-shrink: 0; }
+.cover-button {
+  position: relative; display: block; width: 76px; height: 100px; padding: 0;
+  overflow: hidden; border: 1px solid var(--border); border-radius: 9px;
+  background: #e8eef6; cursor: zoom-in;
+}
+.cover-button:disabled { cursor: default; }
+.cover-placeholder {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: #fff; font-size: 18px; font-weight: 700;
+  background: linear-gradient(155deg, #2b598e, #173b67);
+}
+.cover-button.cover-xhs .cover-placeholder { background: linear-gradient(155deg, #e44e70, #a7193a); }
+.cover-button.image-failed .cover-hint { display: none; }
+.cover-hint {
+  position: absolute; right: 5px; bottom: 5px; z-index: 2; padding: 1px 5px;
+  border-radius: 4px; background: rgba(22, 38, 59, .74); color: #fff; font-size: 10px;
+}
 .cover {
-  width: 72px; height: 72px;
-  border-radius: 8px;
+  position: relative; z-index: 1; width: 100%; height: 100%;
   object-fit: cover;
-  border: 1px solid var(--border);
-  background: #f0f1f4;
+  background: #e8eef6;
 }
 .result-content { flex: 1; min-width: 0; }
 
@@ -174,12 +196,18 @@ textarea:focus { border-color: var(--primary); }
 .copy-row .btn { flex: 1; min-width: 120px; white-space: nowrap; }
 .btn-copy { background: var(--primary); color: #fff; }
 .btn-copy:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-copy[data-kind="caption"] { background: var(--primary-soft); color: #124c9d; }
+.btn-copy[data-kind="caption"]:hover:not(:disabled) { background: #dce9fc; }
 .btn-copy.copied { background: var(--success); }
+.result-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
 
 .history-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .history-item:last-child { border-bottom: none; }
 .history-link { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.history-card-body { display: flex; gap: 12px; margin-top: 8px; }
+.history-card-content { flex: 1; min-width: 0; }
+.history-card-body .cover-button { width: 56px; height: 74px; }
 
 .hidden { display: none !important; }
 .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
@@ -249,7 +277,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   position: fixed;
   top: 20px; left: 50%;
   transform: translateX(-50%);
-  background: #32373d;
+  background: #16263b;
   color: #fff;
   padding: 10px 20px;
   border-radius: 8px;
@@ -261,11 +289,22 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 }
 .toast.show { opacity: 1; }
 
+.cover-preview {
+  position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center;
+  padding: 24px; background: rgba(12, 24, 40, .76); backdrop-filter: blur(4px);
+}
+.preview-dialog { position: relative; width: min(100%, 480px); max-height: 100%; }
+.preview-image { display: block; width: 100%; max-height: calc(100vh - 96px); object-fit: contain; border-radius: 12px; background: #0b1726; }
+.preview-close {
+  position: absolute; top: 10px; right: 10px; width: 40px; height: 40px; border: 0;
+  border-radius: 50%; background: rgba(12, 24, 40, .78); color: #fff; font-size: 22px; cursor: pointer;
+}
+
 /* ================= 移动端适配（A/C 项） ================= */
 @media (max-width: 600px) {
   .container { padding: 16px 12px 72px; }
   header { padding: 18px 0 14px; }
-  header h1 { font-size: 20px; }
+  header h1 { font-size: 23px; }
   header p { font-size: 13px; }
   .card { padding: 14px; }
   textarea { min-height: 96px; font-size: 14px; }
@@ -275,7 +314,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   .btn { min-height: 44px; }
   .copy-row .btn { min-height: 44px; font-size: 14px; }
   /* 封面缩小 */
-  .cover { width: 56px; height: 56px; }
+  .cover-button { width: 64px; height: 84px; }
   /* 统计卡片窄屏单列 */
   .stats-grid { grid-template-columns: 1fr; gap: 10px; }
   .stat-card .num { font-size: 24px; }
@@ -283,12 +322,18 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   .trend-line { height: 140px; }
   /* tab 栏触控加大 */
   .tab { padding: 10px 14px; font-size: 14px; }
+  .caption-toggle { min-width: 44px; min-height: 44px; }
   /* 结果卡片间距收紧 */
   .result-item { padding: 12px; }
   .field-value { font-size: 13px; }
   /* toast 顶部避开刘海 */
   .toast { top: calc(12px + env(safe-area-inset-top)); }
   .footer-author { font-size: 10px; }
+  .cover-preview { padding: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }
 
 /* 大屏更大方 */
@@ -301,33 +346,35 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
 <div class="container">
   <header>
+    <div class="eyebrow">CONTENT LINK DESK</div>
     <h1>🔗 链接提取工具</h1>
     <p>粘贴抖音 / 小红书分享链接，批量提取转换链接与文案，逐条复制</p>
   </header>
 
-  <div class="tab-bar">
-    <button class="tab active" data-tab="extract" onclick="switchTab('extract')">提取</button>
-    <button class="tab" data-tab="stats" onclick="switchTab('stats')">统计</button>
-    <button class="tab" data-tab="history" onclick="switchTab('history')">历史记录</button>
+  <div class="tab-bar" role="tablist" aria-label="功能导航">
+    <button class="tab active" id="tab-button-extract" role="tab" aria-selected="true" aria-controls="tab-extract" data-tab="extract" onclick="switchTab('extract')" onkeydown="handleTabKey(event)">提取</button>
+    <button class="tab" id="tab-button-stats" role="tab" aria-selected="false" aria-controls="tab-stats" data-tab="stats" onclick="switchTab('stats')" onkeydown="handleTabKey(event)">统计</button>
+    <button class="tab" id="tab-button-history" role="tab" aria-selected="false" aria-controls="tab-history" data-tab="history" onclick="switchTab('history')" onkeydown="handleTabKey(event)">历史记录</button>
   </div>
 
   <!-- 提取页 -->
-  <div id="tab-extract">
+  <div id="tab-extract" role="tabpanel" aria-labelledby="tab-button-extract">
     <div class="card">
-      <h2>输入链接</h2>
+      <label class="input-label" for="inputUrls">输入链接</label>
       <textarea id="inputUrls" placeholder="粘贴抖音/小红书分享链接，每行一个，也支持整段复制（自动识别其中的链接）&#10;&#10;粘贴后 1 秒自动开始提取" oninput="onInputChange()"></textarea>
       <div class="link-count" id="linkCount"></div>
       <div class="toolbar">
         <button class="btn btn-primary" id="btnExtract" onclick="doExtract()">🔍 提取全部</button>
         <button class="btn btn-ghost" onclick="clearInput()">清空</button>
+        <button class="btn btn-ghost hidden" id="btnRetryFailed" onclick="retryFailedLinks()">🔄 重试失败项</button>
       </div>
-      <div class="status" id="extractStatus"></div>
+      <div class="status" id="extractStatus" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="results"></div>
   </div>
 
   <!-- 统计页 -->
-  <div id="tab-stats" class="hidden">
+  <div id="tab-stats" class="hidden" role="tabpanel" aria-labelledby="tab-button-stats">
     <div class="stats-grid" id="statsGrid"></div>
     <div class="card" style="margin-top:16px;">
       <h2>近 7 天提取趋势</h2>
@@ -336,24 +383,31 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   </div>
 
   <!-- 历史页 -->
-  <div id="tab-history" class="hidden">
+  <div id="tab-history" class="hidden" role="tabpanel" aria-labelledby="tab-button-history">
     <div class="card">
       <div class="toolbar" style="margin-top:0;">
         <button class="btn btn-ghost" onclick="loadHistory()">🔄 刷新</button>
         <button class="btn btn-danger" id="btnClearHistory" onclick="clearHistory()">🗑 清空历史</button>
       </div>
-      <div class="status" id="historyStatus"></div>
+      <div class="status" id="historyStatus" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="historyList"></div>
   </div>
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.7</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.4.8</div>
   </footer>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<div class="cover-preview hidden" id="coverPreview" role="dialog" aria-modal="true" aria-labelledby="coverPreviewTitle" onclick="closeCoverPreviewOnBackdrop(event)">
+  <div class="preview-dialog">
+    <button class="preview-close" id="coverPreviewClose" type="button" onclick="closeCoverPreview()" aria-label="关闭封面预览">×</button>
+    <img class="preview-image" id="coverPreviewImage" alt="">
+    <p id="coverPreviewTitle" class="hidden">封面预览</p>
+  </div>
+</div>
 
 <script>
 function getCookie(name) {
@@ -442,13 +496,68 @@ function showToast(msg) {
   t._timer = setTimeout(() => t.classList.remove("show"), 1600);
 }
 
+let coverPreviewTrigger = null;
+let coverPreviewBodyOverflow = "";
+
+function openCoverPreview(src, alt) {
+  if (!src) return;
+  const modal = document.getElementById("coverPreview");
+  const image = document.getElementById("coverPreviewImage");
+  const title = document.getElementById("coverPreviewTitle");
+  coverPreviewTrigger = document.activeElement;
+  coverPreviewBodyOverflow = document.body.style.overflow;
+  image.src = src;
+  image.alt = alt || "内容封面";
+  title.textContent = (alt || "内容封面") + "预览";
+  modal.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+  document.getElementById("coverPreviewClose").focus();
+}
+
+function closeCoverPreview() {
+  const modal = document.getElementById("coverPreview");
+  if (modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  document.getElementById("coverPreviewImage").removeAttribute("src");
+  document.body.style.overflow = coverPreviewBodyOverflow;
+  if (coverPreviewTrigger && typeof coverPreviewTrigger.focus === "function") coverPreviewTrigger.focus();
+  coverPreviewTrigger = null;
+}
+
+function closeCoverPreviewOnBackdrop(event) {
+  if (event.target === event.currentTarget) closeCoverPreview();
+}
+
+document.addEventListener("keydown", function (event) {
+  if (event.key === "Escape") closeCoverPreview();
+});
+
 function switchTab(tab) {
-  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+  document.querySelectorAll(".tab").forEach(t => {
+    const active = t.dataset.tab === tab;
+    t.classList.toggle("active", active);
+    t.setAttribute("aria-selected", String(active));
+    t.tabIndex = active ? 0 : -1;
+  });
   document.getElementById("tab-extract").classList.toggle("hidden", tab !== "extract");
   document.getElementById("tab-stats").classList.toggle("hidden", tab !== "stats");
   document.getElementById("tab-history").classList.toggle("hidden", tab !== "history");
   if (tab === "stats") loadStats();
   if (tab === "history") loadHistory();
+}
+
+function handleTabKey(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = [...document.querySelectorAll(".tab")];
+  const current = tabs.indexOf(event.currentTarget);
+  let next = current;
+  if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+  if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+  if (event.key === "Home") next = 0;
+  if (event.key === "End") next = tabs.length - 1;
+  event.preventDefault();
+  tabs[next].focus();
+  switchTab(tabs[next].dataset.tab);
 }
 
 function clearInput() {
@@ -466,7 +575,10 @@ function clearInput() {
 function extractUrls(text) {
   const re = /https?:\/\/[^\s\u4e00-\u9fff]+/g;
   const found = (text || "").match(re) || [];
-  return found.map(u => u.trim()).filter(Boolean);
+  const seen = new Set();
+  return found
+    .map(u => u.trim().replace(/[.,;:!?，。；：！？）】》]+$/g, ""))
+    .filter(u => u && !seen.has(u) && seen.add(u));
 }
 
 /** 实时统计输入框中的链接数 */
@@ -520,6 +632,7 @@ function flashCopied(btn) {
 let autoExtractTimer = null;
 let lastAutoValue = "";      // 上次自动提取的内容，避免重复提取
 let extractingNow = false;   // 提取中防重复
+let latestResults = [];
 
 /** 输入变化：更新计数 + 防抖 1 秒自动提取 */
 function onInputChange() {
@@ -551,11 +664,14 @@ async function doExtract(isAuto = false) {
   const btn = document.getElementById("btnExtract");
   const status = document.getElementById("extractStatus");
   const box = document.getElementById("results");
+  const retryFailedBtn = document.getElementById("btnRetryFailed");
   btn.disabled = true;
   btn.innerHTML = '<span class="loading-spinner"></span>提取中...';
   status.textContent = `正在提取 ${urls.length} 条链接...`;
   status.classList.remove("error");
   box.innerHTML = "";  // 清空旧结果，流式逐条追加
+  latestResults = [];
+  retryFailedBtn.classList.add("hidden");
 
   let okCount = 0;
   let failCount = 0;
@@ -599,10 +715,15 @@ async function doExtract(isAuto = false) {
           status.textContent = `正在提取 ${msg.total} 条链接...（完成 ${0}/${msg.total}）`;
         } else if (msg.type === "item") {
           const r = msg.data;
+          r.source_index = Number.isInteger(msg.source_index) ? msg.source_index : appended;
+          latestResults.push(r);
           appended++;
           if (r.success) okCount++; else failCount++;
           const item = document.createElement("div");
           item.className = "result-item";
+          item.dataset.sourceIndex = String(r.source_index);
+          item.dataset.originalUrl = r.original_url || "";
+          item.dataset.videoUrl = r.video_url || "";
           item.innerHTML = resultCardHtml(r, appended - 1);
           box.appendChild(item);
           initCaptionToggles(item);
@@ -620,6 +741,7 @@ async function doExtract(isAuto = false) {
       localStorage.setItem("device_sig", deviceSig);
     }
     status.textContent = `完成：成功 ${okCount} 条，失败 ${failCount} 条`;
+    retryFailedBtn.classList.toggle("hidden", failCount === 0);
     lastAutoValue = raw;  // 记录已提取内容，避免自动重复提取
   } catch (e) {
     status.textContent = e.message || "提取失败";
@@ -634,6 +756,24 @@ async function doExtract(isAuto = false) {
 function esc(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function coverPreviewHtml(coverUrl, alt, platformRaw = "") {
+  const isXhs = platformRaw === "xiaohongshu";
+  const label = alt || "内容封面";
+  const platformMark = isXhs ? "红" : platformRaw === "douyin" ? "抖" : "图";
+  const buttonClass = "cover-button" + (isXhs ? " cover-xhs" : "");
+  if (!coverUrl) {
+    return `<button class="${buttonClass}" type="button" disabled aria-label="暂无${esc(label)}预览">
+      <span class="cover-placeholder" aria-hidden="true">${platformMark}</span>
+    </button>`;
+  }
+  const proxyUrl = "/api/cover?url=" + encodeURIComponent(coverUrl);
+  return `<button class="${buttonClass}" type="button" data-src="${proxyUrl}" data-alt="${esc(label)}" onclick="openCoverPreview(this.dataset.src, this.dataset.alt)" aria-label="预览${esc(label)}">
+    <span class="cover-placeholder" aria-hidden="true">${platformMark}</span>
+    <img class="cover" src="${proxyUrl}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onerror="this.closest('.cover-button').classList.add('image-failed'); this.remove()">
+    <span class="cover-hint" aria-hidden="true">预览</span>
+  </button>`;
 }
 
 /** 生成单条结果卡片 HTML（renderResults 与重试替换共用） */
@@ -657,9 +797,8 @@ function resultCardHtml(r, i) {
 
   if (r.success) {
     // 优先展示：封面 + 转换链接 + 文案
-    const cover = r.cover_url
-      ? `<div class="cover-wrap"><img class="cover" src="/api/cover?url=${encodeURIComponent(r.cover_url)}" referrerpolicy="no-referrer" alt="封面" onerror="this.style.display='none'"></div>`
-      : "";
+    const coverLabel = r.title || r.caption || r.platform || "内容";
+    const cover = `<div class="cover-wrap">${coverPreviewHtml(r.cover_url, coverLabel, r.platform_raw)}</div>`;
     html += `
       <div class="result-main">
         ${cover}
@@ -698,6 +837,9 @@ function resultCardHtml(r, i) {
       });
       html += `</div>`;
     }
+    if (r.video_url && r.video_url !== r.canonical_url) {
+      html += `<div class="result-actions"><button class="btn btn-sm btn-ghost" onclick="copyText(this.closest('.result-item').dataset.videoUrl, this)">复制原视频链接</button></div>`;
+    }
   } else {
     html += `
       <div class="field">
@@ -710,6 +852,7 @@ function resultCardHtml(r, i) {
       </div>
       ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}</div></div>` : ""}
       <div class="copy-row" style="margin-top:12px;">
+        <button class="btn btn-ghost" onclick="copyText(this.closest('.result-item').dataset.originalUrl, this)">📋 复制原链接</button>
         <button class="btn btn-ghost" onclick="retryLink(this, ${i})">🔄 重试这条</button>
       </div>`;
   }
@@ -796,8 +939,8 @@ async function extractOneStream(url) {
 
 /** 重试单条失败链接：重新提取并替换该卡片 */
 async function retryLink(btn, index) {
-  const urls = extractUrls(document.getElementById("inputUrls").value);
-  const target = urls[index];
+  const card = btn.closest(".result-item");
+  const target = card && card.dataset.originalUrl;
   if (!target) { showToast("找不到原始链接，请重新粘贴"); return; }
 
   const oldText = btn.textContent;
@@ -808,10 +951,10 @@ async function retryLink(btn, index) {
     if (r && r.success) {
       showToast("重试成功！");
       // 用新结果替换整个卡片
-      const card = btn.closest(".result-item");
       if (card) {
         card.remove();
         const box = document.getElementById("results");
+        r.source_index = Number(card.dataset.sourceIndex);
         const rebuilt = renderSingleResult(r, index);
         // 重新排序索引
         const all = [...box.querySelectorAll(".result-item")];
@@ -836,9 +979,21 @@ async function retryLink(btn, index) {
 function renderSingleResult(r, index) {
   const item = document.createElement("div");
   item.className = "result-item";
+  item.dataset.sourceIndex = String(Number.isInteger(r.source_index) ? r.source_index : index);
+  item.dataset.originalUrl = r.original_url || "";
+  item.dataset.videoUrl = r.video_url || "";
   item.innerHTML = resultCardHtml(r, index);
   initCaptionToggles(item);
   return item;
+}
+
+async function retryFailedLinks() {
+  const failed = latestResults.filter(r => !r.success && r.original_url);
+  if (!failed.length || extractingNow) return;
+  document.getElementById("inputUrls").value = failed.map(r => r.original_url).join("\n");
+  updateLinkCount();
+  showToast(`正在重试 ${failed.length} 条失败链接`);
+  await doExtract();
 }
 
 /** 重新编号所有结果卡片索引 */
@@ -949,8 +1104,11 @@ async function loadHistory() {
             ? '<span class="result-badge badge-ok">成功</span>'
             : '<span class="result-badge badge-fail">失败</span>'}
         </div>
-        ${h.status === "success"
-          ? `
+        <div class="history-card-body">
+          ${h.status === "success" && h.cover_url ? `<div class="cover-wrap">${coverPreviewHtml(h.cover_url, h.title || h.caption || h.platform || "内容", h.platform === "小红书" ? "xiaohongshu" : h.platform === "抖音" ? "douyin" : "")}</div>` : ""}
+          <div class="history-card-content">
+            ${h.status === "success"
+              ? `
             <div class="field" style="margin-top:8px;">
               <div class="field-label">转换链接</div>
               <div class="field-value link" title="${esc(h.canonical_url || h.original_url)}">${esc(h.canonical_url || h.original_url)}</div>
@@ -960,12 +1118,14 @@ async function loadHistory() {
               <button class="btn btn-sm btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.link').innerText, this)">复制链接</button>
               ${h.caption ? `<button class="btn btn-sm btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.caption').innerText, this)">复制文案</button>` : ""}
             </div>`
-          : `
+              : `
             <div class="field" style="margin-top:8px;">
               <div class="field-label">原始链接</div>
               <div class="field-value link" title="${esc(h.original_url)}">${esc(h.original_url)}</div>
             </div>
             <div class="field"><div class="field-label">错误</div><div class="field-value" style="color:var(--error);">${esc(h.error)}</div></div>`}
+          </div>
+        </div>
       </div>
     `).join("");
     initCaptionToggles(list);

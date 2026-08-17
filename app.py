@@ -37,12 +37,38 @@ from lib.extractor import extract_link
 
 # ---------------------------------------------------------------- 安全配置
 
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "data" / "history.db"
+DEVICE_SECRET_PATH = BASE_DIR / "data" / ".device_secret"
+
+
+def _load_device_secret() -> str:
+    """优先使用环境变量；本机未配置时持久化随机密钥，避免历史记录因重启失效。"""
+    configured = os.environ.get("DEVICE_SECRET", "").strip()
+    if configured:
+        return configured
+    try:
+        if DEVICE_SECRET_PATH.exists():
+            saved = DEVICE_SECRET_PATH.read_text(encoding="utf-8").strip()
+            if saved:
+                return saved
+        DEVICE_SECRET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_hex(16)
+        DEVICE_SECRET_PATH.write_text(generated + "\n", encoding="utf-8")
+        logging.getLogger(__name__).warning(
+            "DEVICE_SECRET 未设置，已生成并保存本机密钥；生产环境请设置环境变量 DEVICE_SECRET"
+        )
+        return generated
+    except OSError:
+        generated = secrets.token_hex(16)
+        logging.getLogger(__name__).warning(
+            "DEVICE_SECRET 未设置且无法保存本机密钥，重启后历史设备标识将失效；生产环境请设置 DEVICE_SECRET"
+        )
+        return generated
+
+
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
-DEVICE_SECRET = os.environ.get("DEVICE_SECRET", "")
-if not DEVICE_SECRET:
-    DEVICE_SECRET = secrets.token_hex(16)
-    log_warn = logging.getLogger(__name__)
-    log_warn.warning("DEVICE_SECRET 未设置，已生成临时密钥（重启后已签发的 device_id 将失效）；生产环境请设置环境变量 DEVICE_SECRET")
+DEVICE_SECRET = _load_device_secret()
 
 # ---------------------------------------------------------------- 日志
 
@@ -68,9 +94,6 @@ def setup_logging():
 
 
 log = setup_logging()
-
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "data" / "history.db"
 
 app = Flask(__name__, static_folder="app/static", static_url_path="/static")
 app.config["JSON_AS_ASCII"] = False
@@ -280,6 +303,7 @@ def _optimize_response(response):
     if (
         response.status_code == 200
         and not response.direct_passthrough
+        and not response.is_streamed
         and "Accept-Ranges" not in response.headers
         and "gzip" in (request.headers.get("Accept-Encoding") or "")
         and response.content_type
@@ -324,13 +348,17 @@ def api_extract():
         lines = []
 
     # 从每行中提取所有 URL（兼容整段混合文本：文案+多个链接同一行）
+    # 分享文案常在链接末尾附带中文标点，提取前统一清掉，并保持首次出现顺序去重。
     urls = []
+    seen_urls = set()
     for line in lines:
         found = re.findall(r"https?://[^\s\u4e00-\u9fff]+", line)
-        if found:
-            urls.extend(found)
-        else:
-            urls.append(line)  # 无 URL 的行保留原样，由提取器给出友好错误
+        candidates = found or [line]  # 无 URL 的行保留原样，由提取器给出友好错误
+        for candidate in candidates:
+            normalized = candidate.rstrip(".,;:!?，。；：！？）】》")
+            if normalized and normalized not in seen_urls:
+                urls.append(normalized)
+                seen_urls.add(normalized)
 
     if not urls:
         return jsonify({"success": False, "error": "请粘贴至少一个链接"}), 400
@@ -403,9 +431,9 @@ def api_extract():
         yield json.dumps(payload, ensure_ascii=False) + "\n"
         done = 0
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {pool.submit(_process_one, u): u for u in urls}
+            futures = {pool.submit(_process_one, u): (source_index, u) for source_index, u in enumerate(urls)}
             for fut in as_completed(futures):
-                url = futures[fut]
+                source_index, url = futures[fut]
                 try:
                     item = fut.result()
                 except Exception as e:
@@ -417,7 +445,10 @@ def api_extract():
                         "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
                     }
                 done += 1
-                yield json.dumps({"type": "item", "index": done, "data": item}, ensure_ascii=False) + "\n"
+                yield json.dumps(
+                    {"type": "item", "index": done, "source_index": source_index, "data": item},
+                    ensure_ascii=False,
+                ) + "\n"
         # 收尾：清理该设备超限历史
         try:
             c = _get_db()

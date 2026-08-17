@@ -343,12 +343,35 @@ class ExtractResult:
 
 # ---------------------------------------------------------------- 抖音提取
 
+def _parse_douyin_video_info(html: str) -> Optional[dict[str, Any]]:
+    """从抖音 HTML 中提取 videoInfoRes；页面无 _ROUTER_DATA 或结构不完整时返回 None。
+
+    注意：抖音风控时可能返回「有 _ROUTER_DATA 标记但 loaderData 是占位/不完整」的页面，
+    因此不能只看正则是否匹配，必须校验能否解析出 videoInfoRes。
+    """
+    pattern = re.compile(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", flags=re.DOTALL)
+    match = pattern.search(html)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1).strip())
+    except (ValueError, TypeError):
+        return None
+    loader_data = data.get("loaderData") or {}
+    for key in ("video_(id)/page", "note_(id)/page"):
+        page = loader_data.get(key) or {}
+        if page.get("videoInfoRes"):
+            return page["videoInfoRes"]
+    return None
+
+
 def _extract_douyin(url: str) -> dict[str, Any]:
     """抖音提取：移动端分享页 _ROUTER_DATA JSON 解析。
 
-    SDK 原版策略：Session 保持 cookie + 首次响应优先解析；失败后用
-    构造的 iesdouyin share URL 二次请求；仍失败则稍等重试一次，
-    以对抗抖音偶发的 JS 挑战页（无 _ROUTER_DATA 的风控响应）。
+    SDK 原版策略：Session 保持 cookie + 首次响应优先解析；解析不出
+    videoInfoRes 时（无 _ROUTER_DATA 或占位页）用构造的 iesdouyin
+    share URL 二次请求；仍失败则稍等带新会话重试一次，
+    以对抗抖音偶发的 JS 挑战页/占位页风控响应。
     """
     source_url = _extract_first_url(url)
     session = _get_session()
@@ -359,39 +382,27 @@ def _extract_douyin(url: str) -> dict[str, Any]:
     share_kind = "note" if "/note/" in final_url else "video"
     share_url = f"https://www.iesdouyin.com/share/{share_kind}/{video_id}"
 
-    pattern = re.compile(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", flags=re.DOTALL)
-    match = pattern.search(share_response.text)
-    if not match:
+    video_info_res = _parse_douyin_video_info(share_response.text)
+    if not video_info_res:
         # 第二次请求：构造的 iesdouyin share URL
         response, _final = _safe_follow_redirects(session, share_url, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
-        match = pattern.search(response.text)
-    if not match:
-        # 仍无数据：大概率是 JS 挑战页/风控，等待后带新会话重试一次
+        video_info_res = _parse_douyin_video_info(response.text)
+    if not video_info_res:
+        # 仍无数据：大概率是 JS 挑战页/占位页风控，等待后带新会话重试一次
         time.sleep(1.5)
         session2 = _get_session()
         for target in (share_url, source_url):
             try:
                 resp, _fin = _safe_follow_redirects(session2, target, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
-                match = pattern.search(resp.text)
-                if match:
+                video_info_res = _parse_douyin_video_info(resp.text)
+                if video_info_res:
                     break
             except Exception:
                 continue
-    if not match:
+    if not video_info_res:
         raise ValueError(
             "从抖音 HTML 中解析视频信息失败（页面可能触发风控验证，请稍后重试）"
         )
-
-    data = json.loads(match.group(1).strip())
-    loader_data = data.get("loaderData") or {}
-    video_info_res = None
-    for key in ("video_(id)/page", "note_(id)/page"):
-        page = loader_data.get(key) or {}
-        if page.get("videoInfoRes"):
-            video_info_res = page["videoInfoRes"]
-            break
-    if not video_info_res:
-        raise ValueError("无法从抖音 JSON 中解析视频或图集信息")
 
     item_list = video_info_res.get("item_list") or []
     if not item_list:
