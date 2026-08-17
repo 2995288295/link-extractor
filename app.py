@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -83,6 +83,8 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
 
 # 每个批次的外部平台请求并发数。默认 3，兼顾批量速度与平台风控风险。
 EXTRACT_CONCURRENCY = _bounded_int_env("EXTRACT_CONCURRENCY", 3, 1, 5)
+GLOBAL_EXTRACT_CONCURRENCY = _bounded_int_env("GLOBAL_EXTRACT_CONCURRENCY", 3, 1, 6)
+_extract_queue = ThreadPoolExecutor(max_workers=GLOBAL_EXTRACT_CONCURRENCY, thread_name_prefix="extract")
 
 # ---------------------------------------------------------------- 日志
 
@@ -199,6 +201,8 @@ def _init_db():
             cover_url TEXT DEFAULT '',
             status TEXT DEFAULT 'success',
             error TEXT DEFAULT '',
+            duration_ms INTEGER DEFAULT 0,
+            cache_hit INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         )
         """
@@ -216,6 +220,13 @@ def _init_db():
     # 管理看板全局聚合查询加速
     conn.execute("CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_history_status ON history(status)")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(history)")}
+    if "duration_ms" not in columns:
+        conn.execute("ALTER TABLE history ADD COLUMN duration_ms INTEGER DEFAULT 0")
+    if "cache_hit" not in columns:
+        conn.execute("ALTER TABLE history ADD COLUMN cache_hit INTEGER DEFAULT 0")
+    conn.execute("CREATE TABLE IF NOT EXISTS extract_cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_extract_cache_expiry ON extract_cache(expires_at)")
     conn.commit()
     conn.close()
 
@@ -410,8 +421,8 @@ def api_extract():
                 """
                 INSERT INTO history
                 (device_id, original_url, canonical_url, platform, title, caption,
-                 author_name, publish_time, like_count, video_url, cover_url, status, error, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 author_name, publish_time, like_count, video_url, cover_url, status, error, duration_ms, cache_hit, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     device_id, item["original_url"], item["canonical_url"], item["platform"],
@@ -419,6 +430,7 @@ def api_extract():
                     item["like_count"], item["video_url"], item["cover_url"],
                     "success" if item["success"] else "error",
                     item["error"] if not item["success"] else "",
+                    item["duration_ms"], int(item["cache_hit"]),
                     now,
                 ),
             )
@@ -447,9 +459,11 @@ def api_extract():
             "post_id": result.post_id,
             "error": result.error,
             "hint": result.hint,
+            "cache_hit": result.cache_hit,
         }
         # 日志
         elapsed_ms = (time.monotonic() - started_at) * 1000
+        item["duration_ms"] = round(elapsed_ms)
         if result.success:
             log.info("提取成功 [%s] %s -> %s (作者:%s 点赞:%d 耗时:%.0fms)",
                      result.platform, url[:60], result.canonical_url,
@@ -469,10 +483,16 @@ def api_extract():
         yield json.dumps(payload, ensure_ascii=False) + "\n"
         done = 0
         success_count = 0
-        with ThreadPoolExecutor(max_workers=EXTRACT_CONCURRENCY) as pool:
-            futures = {pool.submit(_process_one, u): (source_index, u) for source_index, u in enumerate(urls)}
-            for fut in as_completed(futures):
+        url_iter = iter(enumerate(urls))
+        futures = {}
+        for _ in range(min(EXTRACT_CONCURRENCY, len(urls))):
+            source_index, url = next(url_iter)
+            futures[_extract_queue.submit(_process_one, url)] = (source_index, url)
+        while futures:
+            ready, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for fut in ready:
                 source_index, url = futures[fut]
+                del futures[fut]
                 try:
                     item = fut.result()
                 except Exception as e:
@@ -489,6 +509,11 @@ def api_extract():
                     {"type": "item", "index": done, "source_index": source_index, "data": item},
                     ensure_ascii=False,
                 ) + "\n"
+                try:
+                    next_index, next_url = next(url_iter)
+                    futures[_extract_queue.submit(_process_one, next_url)] = (next_index, next_url)
+                except StopIteration:
+                    pass
         # 收尾：清理该设备超限历史
         try:
             c = _get_db()
@@ -735,6 +760,30 @@ def api_admin_errors():
     conn.close()
     errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
     return jsonify({"success": True, "errors": errors})
+
+
+@app.route("/api/admin/performance", methods=["GET"])
+def api_admin_performance():
+    """性能汇总：平均提取耗时、缓存命中和队列配置。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history"
+    ).fetchone()
+    conn.close()
+    total = row["total"] or 0
+    hits = row["cache_hits"] or 0
+    return jsonify({
+        "success": True,
+        "total": total,
+        "avg_duration_ms": round(row["avg_ms"] or 0),
+        "cache_hits": hits,
+        "cache_hit_rate": round(hits / total * 100, 1) if total else 0,
+        "batch_concurrency": EXTRACT_CONCURRENCY,
+        "queue_concurrency": GLOBAL_EXTRACT_CONCURRENCY,
+    })
 
 
 @app.route("/api/admin/recent", methods=["GET"])

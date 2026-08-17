@@ -2,7 +2,7 @@
 
 粘贴抖音/小红书分享链接 → 批量提取**转换链接 + 文案** → 逐条独立复制。轻量 Web 工具，纯 Python + requests，无浏览器依赖，适合低内存服务器。
 
-**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.2
+**作者**：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.3
 **版权说明**：本工具免费开源，任何人可自由使用/修改/分发，但请保留页面底部及本文档的作者信息。
 
 ## 项目概述
@@ -80,6 +80,7 @@ PORT=8080 python app.py
 | `RATE_IP_PER_MINUTE` | 可选 | 每 IP 每分钟请求上限，默认 20 |
 | `RATE_DEVICE_PER_MINUTE` | 可选 | 每设备每分钟请求上限，默认 15 |
 | `EXTRACT_CONCURRENCY` | 可选 | 单个批次的提取并发数，默认 3，范围 1-5 |
+| `GLOBAL_EXTRACT_CONCURRENCY` | 可选 | 每个服务进程的提取队列并发数，默认 3，范围 1-6 |
 
 > **口令模块说明（v1.4.6 起）**：默认隐藏不启用——部署时不设置 `ACCESS_TOKEN`，任何人可直接使用。若以后想恢复访问限制，只需设置 `ACCESS_TOKEN` 环境变量重启服务即可（前端会自动弹出输入框，无需改代码）。
 
@@ -163,6 +164,19 @@ sudo systemctl enable --now link-extractor-healthcheck.timer
 ```
 
 检查状态：`systemctl list-timers link-extractor-healthcheck.timer`。检查失败和自动重启记录在 `journalctl -t link-extractor-healthcheck`。该机制仅做本机自动恢复；如需手机/短信告警，应另接外部监控服务。
+
+## 性能与数据库维护
+
+成功提取结果会按完整输入链接缓存 24 小时，跨服务进程和重启有效；DNS 公网校验缓存 60 秒，仍会定期重新校验。管理员可调用 `/api/admin/performance` 查看平均耗时和缓存命中率。
+
+`ops/link-extractor-db-maintenance.timer` 每日清理过期限流和缓存记录，并执行 SQLite 优化与 WAL 检查点：
+
+```bash
+sudo install -m 644 ops/link-extractor-db-maintenance.service /etc/systemd/system/
+sudo install -m 644 ops/link-extractor-db-maintenance.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now link-extractor-db-maintenance.timer
+```
 
 ## 防火墙
 

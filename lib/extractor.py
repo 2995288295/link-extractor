@@ -10,14 +10,17 @@
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import logging
 import re
+import sqlite3
 import socket
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -47,6 +50,12 @@ def _get_session() -> requests.Session:
 _result_cache: dict[str, tuple[dict[str, Any], float]] = {}
 CACHE_TTL_SECONDS = 24 * 60 * 60      # 24 小时
 CACHE_MAX_ENTRIES = 500
+_CACHE_DB = Path(__file__).resolve().parents[1] / "data" / "history.db"
+
+
+def _cache_key(url: str) -> str:
+    """按完整输入链接隔离缓存，避免跨用户复用带访问参数的结果。"""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
 def _extract_post_id_from_url(url: str) -> str:
@@ -64,29 +73,52 @@ def _extract_post_id_from_url(url: str) -> str:
     return ""
 
 
-def cache_get(post_id: str):
-    """按作品 ID 查缓存，命中返回提取数据。"""
-    if not post_id:
+def cache_get(key: str):
+    """先查本进程热缓存，再查 SQLite 共享缓存。"""
+    if not key:
         return None
-    entry = _result_cache.get(post_id)
-    if not entry:
-        return None
-    data, ts = entry
-    if time.time() - ts > CACHE_TTL_SECONDS:
-        _result_cache.pop(post_id, None)
-        return None
-    return data
+    entry = _result_cache.get(key)
+    if entry:
+        data, ts = entry
+        if time.time() - ts <= CACHE_TTL_SECONDS:
+            return data
+        _result_cache.pop(key, None)
+    try:
+        conn = sqlite3.connect(_CACHE_DB, timeout=2)
+        row = conn.execute(
+            "SELECT result_json FROM extract_cache WHERE cache_key = ? AND expires_at > ?",
+            (key, time.time()),
+        ).fetchone()
+        conn.close()
+        if row:
+            data = json.loads(row[0])
+            _result_cache[key] = (data, time.time())
+            return data
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+    return None
 
 
-def cache_put(post_id: str, data: dict[str, Any]) -> None:
-    """写入作品缓存；超过上限时清空最旧的一半。"""
-    if not post_id:
+def cache_put(key: str, data: dict[str, Any]) -> None:
+    """写入进程热缓存及 SQLite 共享缓存；共享缓存跨 worker 和重启有效。"""
+    if not key:
         return
-    _result_cache[post_id] = (data, time.time())
+    now = time.time()
+    _result_cache[key] = (data, now)
     if len(_result_cache) > CACHE_MAX_ENTRIES:
         items = sorted(_result_cache.items(), key=lambda kv: kv[1][1])
         for k, _v in items[: len(items) // 2]:
             _result_cache.pop(k, None)
+    try:
+        conn = sqlite3.connect(_CACHE_DB, timeout=2)
+        conn.execute(
+            "INSERT OR REPLACE INTO extract_cache (cache_key, result_json, expires_at, updated_at) VALUES (?,?,?,?)",
+            (key, json.dumps(data, ensure_ascii=False), now + CACHE_TTL_SECONDS, now),
+        )
+        conn.commit()
+        conn.close()
+    except (OSError, sqlite3.Error):
+        pass
 
 # ---------------------------------------------------------------- 安全校验
 
@@ -118,6 +150,10 @@ XHS_HEADERS = {
     "Referer": "https://www.xiaohongshu.com/",
 }
 
+_dns_cache: dict[str, tuple[tuple[str, ...], float]] = {}
+_dns_cache_lock = threading.Lock()
+DNS_CACHE_TTL_SECONDS = 60
+
 
 def _is_safe_url(url: str) -> bool:
     """校验 URL 属于允许域名，且解析后不指向私有/回环 IP（防 SSRF）。"""
@@ -128,13 +164,20 @@ def _is_safe_url(url: str) -> bool:
         host = parsed.hostname or ""
         if not any(host == d or host.endswith("." + d) for d in ALLOWED_DOMAINS):
             return False
-        addresses = socket.getaddrinfo(host, None)
+        with _dns_cache_lock:
+            cached = _dns_cache.get(host)
+        if cached and cached[1] > time.monotonic():
+            addresses = [(None, None, None, None, (ip, 0)) for ip in cached[0]]
+        else:
+            addresses = socket.getaddrinfo(host, None)
         if not addresses:
             return False
         for info in addresses:
             ip = ipaddress.ip_address(info[4][0])
             if not ip.is_global:
                 return False
+        with _dns_cache_lock:
+            _dns_cache[host] = (tuple(sorted({info[4][0] for info in addresses})), time.monotonic() + DNS_CACHE_TTL_SECONDS)
         return True
     except Exception:
         return False
@@ -301,6 +344,7 @@ class ExtractResult:
     post_id: str = ""             # 作品 ID（缓存键）
     error: str = ""
     hint: str = ""
+    cache_hit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """转为可缓存/可序列化的字典。"""
@@ -319,6 +363,7 @@ class ExtractResult:
             "post_id": self.post_id,
             "error": self.error,
             "hint": self.hint,
+            "cache_hit": self.cache_hit,
         }
 
     @classmethod
@@ -338,6 +383,7 @@ class ExtractResult:
             post_id=d.get("post_id", ""),
             error=d.get("error", ""),
             hint=d.get("hint", ""),
+            cache_hit=d.get("cache_hit", False),
         )
 
 
@@ -660,11 +706,13 @@ def extract_link(raw: str) -> ExtractResult:
 
         # 缓存优化：先从 URL 预提取作品 ID 查缓存（同一视频不同链接命中秒回）
         post_id = _extract_post_id_from_url(url)
-        if post_id:
-            cached = cache_get(post_id)
-            if cached:
-                logger.info("缓存命中: %s (%s)", post_id, url[:50])
-                return ExtractResult.from_dict(cached)
+        cache_key = _cache_key(url)
+        cached = cache_get(cache_key)
+        if cached:
+            logger.info("缓存命中: %s", cache_key[:10])
+            result = ExtractResult.from_dict(cached)
+            result.cache_hit = True
+            return result
 
         if is_xhs:
             # 小红书：先解析短链判断 token 情况（小红书短链较多）
@@ -704,7 +752,7 @@ def extract_link(raw: str) -> ExtractResult:
         )
         # 写入作品缓存（同一作品后续命中）
         if post_id:
-            cache_put(post_id, result.to_dict())
+            cache_put(cache_key, result.to_dict())
         return result
     except Exception as e:
         # 已知业务错误（作品不存在/缺参数等）对用户有用，保留友好文案；只进日志，不泄露堆栈

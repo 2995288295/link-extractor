@@ -1,0 +1,8 @@
+[Unit]
+Description=Link Extractor SQLite maintenance
+After=link-extractor.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/link-extractor
+ExecStart=/opt/link-extractor/venv/bin/python ops/link-extractor-db-maintenance.py
