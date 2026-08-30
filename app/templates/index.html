@@ -396,7 +396,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.4</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.0</div>
   </footer>
 </div>
 
@@ -785,7 +785,9 @@ function resultCardHtml(r, i) {
       : "";
 
   const badge = r.success
-    ? '<span class="result-badge badge-ok">✓ 成功</span>'
+    ? (r.partial
+      ? '<span class="result-badge badge-ok">✓ 已转换</span>'
+      : '<span class="result-badge badge-ok">✓ 成功</span>')
     : '<span class="result-badge badge-fail">✗ 失败</span>';
 
   let html = `
@@ -814,6 +816,7 @@ function resultCardHtml(r, i) {
           <button class="caption-toggle" type="button" onclick="toggleCaption(this)">展开全部 ▼</button>
         </div>
       </div>
+      ${r.hint ? `<div class="field partial-hint"><div class="field-label">提取提示</div><div class="field-value">${esc(r.hint)}</div></div>` : ""}
       <div class="copy-row">
         <button class="btn btn-copy" onclick="copyText(unescapeHtml(this.parentNode.previousElementSibling.previousElementSibling.querySelector('.field-value').innerText), this)" data-kind="canonical">📋 复制链接</button>
         <button class="btn btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.caption').innerText, this)" data-kind="caption">📋 复制文案</button>

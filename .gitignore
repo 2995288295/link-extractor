@@ -12,6 +12,11 @@ data/
 *.log
 *.tmp
 
+# 本机/服务器部署备份（保留在机器上，不提交到仓库）
+*.bak
+*.bak-*
+backups/
+
 # 系统
 .DS_Store
 Thumbs.db

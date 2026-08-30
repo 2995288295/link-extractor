@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import gzip
+import base64
 import hashlib
 import hmac
 import json
@@ -23,6 +24,8 @@ import sqlite3
 import sys
 import time
 import uuid
+import csv
+import io
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from functools import wraps
@@ -31,7 +34,7 @@ from urllib.parse import urljoin as _urljoin
 from urllib.parse import urlparse as _urlparse
 
 import requests as _requests
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, make_response, request, send_from_directory
 
 from lib.extractor import extract_link
 
@@ -114,6 +117,7 @@ log = setup_logging()
 app = Flask(__name__, static_folder="app/static", static_url_path="/static")
 app.config["JSON_AS_ASCII"] = False
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024  # 请求体 512KB
+SERVICE_STARTED_AT = time.time()
 
 # ---------------------------------------------------------------- 请求日志
 
@@ -154,11 +158,20 @@ def _check_admin_token():
     """
     if not request.path.startswith("/api/admin/"):
         return None
+    if request.path in ("/api/admin/login", "/api/admin/logout"):
+        return None
     if not ADMIN_TOKEN:
         return jsonify({"success": False, "error": "管理员口令未配置"}), 503
     provided = request.headers.get("X-Admin-Token", "")
-    if not provided or not hmac.compare_digest(provided, ADMIN_TOKEN):
+    if provided and hmac.compare_digest(provided, ADMIN_TOKEN):
+        return None
+    if _admin_session_valid(request.cookies.get("admin_session", "")):
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and not hmac.compare_digest(request.headers.get("X-CSRF-Token", ""), request.cookies.get("csrf_token", "")):
+            return jsonify({"success": False, "error": "CSRF 校验失败"}), 403
+        return None
+    if not provided:
         return jsonify({"success": False, "error": "管理员口令错误或未提供"}), 401
+    return jsonify({"success": False, "error": "管理员口令错误或未提供"}), 401
     return None
 
 
@@ -203,6 +216,7 @@ def _init_db():
             error TEXT DEFAULT '',
             duration_ms INTEGER DEFAULT 0,
             cache_hit INTEGER DEFAULT 0,
+            outcome_class TEXT DEFAULT 'success',
             created_at TEXT NOT NULL
         )
         """
@@ -225,10 +239,53 @@ def _init_db():
         conn.execute("ALTER TABLE history ADD COLUMN duration_ms INTEGER DEFAULT 0")
     if "cache_hit" not in columns:
         conn.execute("ALTER TABLE history ADD COLUMN cache_hit INTEGER DEFAULT 0")
+    if "outcome_class" not in columns:
+        conn.execute("ALTER TABLE history ADD COLUMN outcome_class TEXT DEFAULT 'success'")
+    if "retry_count" not in columns:
+        conn.execute("ALTER TABLE history ADD COLUMN retry_count INTEGER DEFAULT 0")
+    if "success_attempt" not in columns:
+        conn.execute("ALTER TABLE history ADD COLUMN success_attempt INTEGER DEFAULT 0")
+    if "retry_reason" not in columns:
+        conn.execute("ALTER TABLE history ADD COLUMN retry_reason TEXT DEFAULT ''")
+    conn.execute("UPDATE history SET outcome_class = CASE "
+                 "WHEN status = 'success' THEN 'success' "
+                 "WHEN error LIKE '%不支持%' OR error LIKE '%xsec_token%' OR error LIKE '%作品 ID%' THEN 'invalid_input' "
+                 "WHEN error LIKE '%失效%' OR error LIKE '%不存在%' THEN 'expired_content' "
+                 "WHEN error LIKE '%风控%' OR error LIKE '%HTML%' OR error LIKE '%JSON%' OR error LIKE '%请求%' THEN 'upstream_error' "
+                 "ELSE 'internal_error' END WHERE status != 'success' AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
     conn.execute("CREATE TABLE IF NOT EXISTS extract_cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_extract_cache_expiry ON extract_cache(expires_at)")
+    conn.execute("CREATE TABLE IF NOT EXISTS admin_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, message TEXT NOT NULL, value REAL DEFAULT 0, created_at TEXT NOT NULL)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_alerts_created ON admin_alerts(created_at)")
+    conn.execute("CREATE TABLE IF NOT EXISTS admin_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, ip TEXT NOT NULL, created_at TEXT NOT NULL)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit(created_at)")
     conn.commit()
     conn.close()
+
+
+def _admin_audit(action: str, ip: str):
+    conn = _get_db()
+    try:
+        conn.execute("INSERT INTO admin_audit(action, ip, created_at) VALUES (?,?,?)", (action, ip, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _classify_outcome(success: bool, error: str) -> str:
+    """Separate user input mistakes from upstream and internal failures."""
+    if success:
+        return "success"
+    text = (error or "").lower()
+    # 只把平台已明确确认不可用的作品归为“内容失效”。
+    # 不要因为提示语里带“请确认链接未失效”就误分为用户错误。
+    if any(token in text for token in ("作品已删除", "作品不存在", "status_reviewing", "not_publicly_available", "平台返回 http 404")):
+        return "expired_content"
+    if any(token in text for token in ("不支持", "xsec_token", "作品 id", "作品id", "无法识别", "直播", "商品")):
+        return "invalid_input"
+    if any(token in text for token in ("风控", "验证", "captcha", "challenge", "html", "json", "请求", "超时", "网络", "完整文案", "未返回可识别")):
+        return "upstream_error"
+    return "internal_error"
 
 
 _init_db()
@@ -371,7 +428,7 @@ def _optimize_response(response):
 
 @app.route("/api/health", methods=["GET"])
 def api_health():
-    return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat()})
+    return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat(), "uptime_seconds": round(time.time() - SERVICE_STARTED_AT)})
 
 
 @app.route("/api/extract", methods=["POST"])
@@ -384,6 +441,9 @@ def api_extract():
 
     data = request.get_json(silent=True) or {}
     raw = data.get("urls", "")
+    # 压测/诊断可显式关闭历史落库，避免把公开样本混入用户转换记录。
+    # 未传该字段时仍按原行为保存，保持现有前端和统计逻辑不变。
+    record_history = data.get("record_history") is not False
 
     # 归一化为行列表：兼容字符串（含换行）和数组
     if isinstance(raw, str):
@@ -421,8 +481,9 @@ def api_extract():
                 """
                 INSERT INTO history
                 (device_id, original_url, canonical_url, platform, title, caption,
-                 author_name, publish_time, like_count, video_url, cover_url, status, error, duration_ms, cache_hit, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 author_name, publish_time, like_count, video_url, cover_url, status, error, duration_ms, cache_hit, outcome_class,
+                 retry_count, success_attempt, retry_reason, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     device_id, item["original_url"], item["canonical_url"], item["platform"],
@@ -430,7 +491,10 @@ def api_extract():
                     item["like_count"], item["video_url"], item["cover_url"],
                     "success" if item["success"] else "error",
                     item["error"] if not item["success"] else "",
-                    item["duration_ms"], int(item["cache_hit"]),
+                    item["duration_ms"], int(item["cache_hit"]), item["outcome_class"],
+                    int((item.get("telemetry") or {}).get("retry_count") or 0),
+                    int((item.get("telemetry") or {}).get("success_attempt") or 0),
+                    str((item.get("telemetry") or {}).get("retry_reason") or ""),
                     now,
                 ),
             )
@@ -459,19 +523,25 @@ def api_extract():
             "post_id": result.post_id,
             "error": result.error,
             "hint": result.hint,
+            "partial": result.partial,
             "cache_hit": result.cache_hit,
+            "telemetry": result.telemetry,
         }
         # 日志
         elapsed_ms = (time.monotonic() - started_at) * 1000
         item["duration_ms"] = round(elapsed_ms)
+        if item["telemetry"]:
+            log.info("请求性能分解 [%s] %s", result.platform_raw or "unknown", " ".join(f"{k}={v}ms" for k, v in item["telemetry"].items() if k.endswith("_ms")))
+        item["outcome_class"] = _classify_outcome(result.success, result.error)
         if result.success:
-            log.info("提取成功 [%s] %s -> %s (作者:%s 点赞:%d 耗时:%.0fms)",
+            log.info("提取成功%s [%s] %s -> %s (作者:%s 点赞:%d 耗时:%.0fms)",
+                     "(仅转换)" if item.get("partial") else "",
                      result.platform, url[:60], result.canonical_url,
                      result.author_name or "-", result.like_count, elapsed_ms)
         else:
             log.warning("提取失败 [%s] 错误:%s (耗时:%.0fms)", url[:60], result.error, elapsed_ms)
-        # 入库
-        _save_to_db(item)
+        if record_history:
+            _save_to_db(item)
         return item
 
     def _stream():
@@ -502,6 +572,7 @@ def api_extract():
                         "title": "", "caption": "", "author_name": "", "publish_time": "",
                         "like_count": 0, "video_url": "", "canonical_url": "", "cover_url": "",
                         "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
+                        "partial": False,
                     }
                 done += 1
                 success_count += int(item["success"])
@@ -514,21 +585,22 @@ def api_extract():
                     futures[_extract_queue.submit(_process_one, next_url)] = (next_index, next_url)
                 except StopIteration:
                     pass
-        # 收尾：清理该设备超限历史
-        try:
-            c = _get_db()
-            c.execute(
-                """
-                DELETE FROM history WHERE device_id = ? AND id NOT IN (
-                    SELECT id FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 200
+        # 收尾：仅在本次确实写入历史时清理该设备超限记录。
+        if record_history:
+            try:
+                c = _get_db()
+                c.execute(
+                    """
+                    DELETE FROM history WHERE device_id = ? AND id NOT IN (
+                        SELECT id FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 200
+                    )
+                    """,
+                    (device_id, device_id),
                 )
-                """,
-                (device_id, device_id),
-            )
-            c.commit()
-            c.close()
-        except Exception:
-            pass
+                c.commit()
+                c.close()
+            except Exception:
+                pass
         log.info(
             "批量提取完成: total=%d success=%d concurrency=%d elapsed=%.0fms",
             len(urls), success_count, EXTRACT_CONCURRENCY,
@@ -604,7 +676,6 @@ def api_stats():
     for row in platform_rows:
         name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
         platform_dist[name] = platform_dist.get(name, 0) + row["c"]
-
     # 近 7 天提取趋势（按 created_at 的日期分组）
     trend = []
     today = datetime.now()
@@ -638,6 +709,66 @@ def _admin_require_rate(ip: str) -> bool:
     return _check_rate_limit(f"admin:{ip}", 30)
 
 
+ADMIN_SESSION_TTL = 8 * 60 * 60
+
+
+def _admin_session_value(timestamp: int) -> str:
+    payload = str(timestamp)
+    signature = hmac.new(ADMIN_TOKEN.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _admin_session_valid(value: str) -> bool:
+    try:
+        payload, signature = value.split(".", 1)
+        timestamp = int(payload)
+    except (AttributeError, ValueError):
+        return False
+    if timestamp > int(time.time()) or int(time.time()) - timestamp > ADMIN_SESSION_TTL:
+        return False
+    expected = _admin_session_value(timestamp).split(".", 1)[1]
+    return hmac.compare_digest(signature, expected)
+
+
+@app.route("/api/admin/login", methods=["POST"])
+def api_admin_login():
+    ip = request.remote_addr or "127.0.0.1"
+    if not _check_rate_limit(f"admin-login:{ip}", 5):
+        return jsonify({"success": False, "error": "登录尝试过于频繁，请稍后再试"}), 429
+    payload = request.get_json(silent=True) or {}
+    provided = str(payload.get("token") or "")
+    if not ADMIN_TOKEN or not provided or not hmac.compare_digest(provided, ADMIN_TOKEN):
+        log.warning("管理员登录失败 from %s", ip)
+        return jsonify({"success": False, "error": "管理员口令错误"}), 401
+    response = make_response(jsonify({"success": True}))
+    response.set_cookie(
+        "admin_session", _admin_session_value(int(time.time())),
+        max_age=ADMIN_SESSION_TTL, httponly=True, secure=request.is_secure,
+        samesite="Lax", path="/",
+    )
+    response.set_cookie("csrf_token", secrets.token_urlsafe(24), max_age=ADMIN_SESSION_TTL, httponly=False, secure=request.is_secure, samesite="Lax", path="/")
+    _admin_audit("login", ip)
+    return response
+
+
+@app.route("/api/admin/logout", methods=["POST"])
+def api_admin_logout():
+    _admin_audit("logout", request.remote_addr or "127.0.0.1")
+    response = make_response(jsonify({"success": True}))
+    response.delete_cookie("admin_session", path="/")
+    response.delete_cookie("csrf_token", path="/")
+    return response
+
+
+def _admin_window():
+    """Resolve the dashboard time window and its SQLite lower bound."""
+    raw = (request.args.get("range") or "7d").lower()
+    days = {"24h": 1, "7d": 7, "30d": 30}.get(raw, 7)
+    label = "24h" if raw == "24h" else f"{days}d"
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    return label, days, since
+
+
 @app.route("/api/admin/overview", methods=["GET"])
 def api_admin_overview():
     """总览：总数/成功率/活跃设备/今日提取/近7天趋势/平台分布（全设备，管理员视角）。"""
@@ -645,53 +776,97 @@ def api_admin_overview():
     if not _admin_require_rate(ip):
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
 
+    window, days, since = _admin_window()
     conn = _get_db()
-    total = conn.execute("SELECT COUNT(*) c FROM history").fetchone()["c"]
-    ok_count = conn.execute("SELECT COUNT(*) c FROM history WHERE status = 'success'").fetchone()["c"]
+    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
+    ok_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status = 'success'", (since,)).fetchone()["c"]
     fail_count = total - ok_count
-    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history").fetchone()["c"]
+    user_error_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input', 'expired_content')", (since,)).fetchone()["c"]
+    service_failure_count = total - ok_count - user_error_count
+    valid_total = total - user_error_count
+    service_success_rate = round(ok_count / valid_total * 100, 1) if valid_total else 0
+    input_validity_rate = round(valid_total / total * 100, 1) if total else 0
+    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
 
     today_str = datetime.now().strftime("%Y-%m-%d")
-    today_count = conn.execute(
-        "SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (today_str + "%",)
-    ).fetchone()["c"]
+    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (today_str + "%",)).fetchone()["c"]
+    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
+    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
 
     platform_rows = conn.execute(
-        "SELECT platform, COUNT(*) c FROM history WHERE status = 'success' GROUP BY platform"
+        "SELECT platform, COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' GROUP BY platform", (since,)
     ).fetchall()
     platform_dist = {}
     for row in platform_rows:
         name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
         platform_dist[name] = platform_dist.get(name, 0) + row["c"]
 
+    platform_health = {}
+    health_rows = conn.execute(
+        "SELECT CASE "
+        "WHEN platform != '' THEN platform "
+        "WHEN lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%' THEN 'douyin' "
+        "WHEN lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%' THEN 'xiaohongshu' "
+        "ELSE '' END AS resolved_platform, COUNT(*) total, "
+        "SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok, "
+        "SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content') THEN 1 ELSE 0 END) user_errors, "
+        "SUM(CASE WHEN outcome_class IN ('upstream_error','internal_error') THEN 1 ELSE 0 END) service_failures "
+        "FROM history WHERE created_at >= ? GROUP BY resolved_platform", (since,)
+    ).fetchall()
+    for row in health_rows:
+        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["resolved_platform"], row["resolved_platform"] or "未知")
+        total_platform = row["total"] or 0
+        ok_platform = row["ok"] or 0
+        user_platform = row["user_errors"] or 0
+        valid_platform = total_platform - user_platform
+        platform_health[name] = {
+            "total": total_platform,
+            "ok": ok_platform,
+            "fail": total_platform - ok_platform,
+            "success_rate": round(ok_platform / total_platform * 100, 1) if total_platform else 0,
+            "service_success_rate": round(ok_platform / valid_platform * 100, 1) if valid_platform else 0,
+            "user_errors": user_platform,
+            "service_failures": row["service_failures"] or 0,
+        }
+
     trend = []
     today = datetime.now()
-    for i in range(6, -1, -1):
+    points = 1 if days == 1 else days
+    for i in range(points - 1, -1, -1):
         day = today - timedelta(days=i)
         day_str = day.strftime("%Y-%m-%d")
         cnt = conn.execute(
-            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (day_str + "%",)
+            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ?", (day_str + "%", since)
         ).fetchone()["c"]
         ok_cnt = conn.execute(
-            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND status = 'success'",
-            (day_str + "%",),
+        "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ? AND outcome_class = 'success'",
+            (day_str + "%", since),
         ).fetchone()["c"]
         trend.append({
             "date": day.strftime("%m-%d"),
             "count": cnt,
             "ok": ok_cnt,
+            "fail": cnt - ok_cnt,
         })
     conn.close()
 
     return jsonify({
         "success": True,
+        "range": window,
         "total": total,
         "ok": ok_count,
         "fail": fail_count,
         "success_rate": round(ok_count / total * 100, 1) if total else 0,
+        "service_success_rate": service_success_rate,
+        "input_validity_rate": input_validity_rate,
+        "user_error_count": user_error_count,
+        "service_failure_count": service_failure_count,
         "active_devices": active_devices,
+        "active_devices_7d": active_7d,
+        "active_devices_30d": active_30d,
         "today_count": today_count,
         "platform_dist": platform_dist,
+        "platform_health": platform_health,
         "trend": trend,
     })
 
@@ -703,7 +878,16 @@ def api_admin_devices():
     if not _admin_require_rate(ip):
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
 
+    _, _, since = _admin_window()
+    try:
+        limit = max(1, min(int(request.args.get("limit", "50")), 100))
+        offset = max(0, int(request.args.get("offset", "0")))
+    except ValueError:
+        limit, offset = 50, 0
     conn = _get_db()
+    total_devices = conn.execute(
+        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)
+    ).fetchone()["c"]
     rows = conn.execute(
         """
         SELECT device_id,
@@ -712,10 +896,11 @@ def api_admin_devices():
                MIN(created_at) AS first_at,
                MAX(created_at) AS last_at
         FROM history
+        WHERE created_at >= ?
         GROUP BY device_id
         ORDER BY total DESC
-        LIMIT 100
-        """
+        LIMIT ? OFFSET ?
+        """, (since, limit, offset)
     ).fetchall()
     conn.close()
 
@@ -739,7 +924,7 @@ def api_admin_devices():
             "first_at": r["first_at"],
             "last_at": r["last_at"],
         })
-    return jsonify({"success": True, "devices": devices})
+    return jsonify({"success": True, "devices": devices, "total": total_devices, "limit": limit, "offset": offset})
 
 
 @app.route("/api/admin/errors", methods=["GET"])
@@ -749,17 +934,18 @@ def api_admin_errors():
     if not _admin_require_rate(ip):
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
 
+    window, _, since = _admin_window()
     conn = _get_db()
     rows = conn.execute(
         """
         SELECT error, COUNT(*) c FROM history
-        WHERE status != 'success' AND error != ''
+        WHERE created_at >= ? AND status != 'success' AND error != ''
         GROUP BY error ORDER BY c DESC LIMIT 30
-        """
+        """, (since,)
     ).fetchall()
     conn.close()
     errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
-    return jsonify({"success": True, "errors": errors})
+    return jsonify({"success": True, "range": window, "errors": errors})
 
 
 @app.route("/api/admin/performance", methods=["GET"])
@@ -768,21 +954,60 @@ def api_admin_performance():
     ip = request.remote_addr or "127.0.0.1"
     if not _admin_require_rate(ip):
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    window, _, since = _admin_window()
     conn = _get_db()
     row = conn.execute(
-        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history"
+        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ?", (since,)
     ).fetchone()
-    conn.close()
+    durations = [r["duration_ms"] for r in conn.execute(
+        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 ORDER BY duration_ms", (since,)
+    ).fetchall()]
     total = row["total"] or 0
     hits = row["cache_hits"] or 0
+    p95 = durations[max(0, (len(durations) * 95 + 99) // 100 - 1)] if durations else 0
+    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success'", (since,)).fetchone()["c"]
+    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content')", (since,)).fetchone()["c"]
+    valid_total = total - user_errors
+    service_failures = valid_total - current_ok
+    retry_rows = conn.execute(
+        "SELECT success_attempt, COUNT(*) c FROM history WHERE created_at >= ? AND platform IN ('抖音', 'douyin') AND success_attempt > 0 GROUP BY success_attempt",
+        (since,),
+    ).fetchall()
+    douyin_total = conn.execute(
+        "SELECT COUNT(*) c FROM history WHERE created_at >= ? AND platform IN ('抖音', 'douyin')", (since,)
+    ).fetchone()["c"] or 0
+    retry_success_attempts = {
+        str(r["success_attempt"]): {
+            "count": r["c"],
+            "rate": round(r["c"] / douyin_total * 100, 1) if douyin_total else 0,
+        }
+        for r in retry_rows
+    }
+    retry_reason_rows = conn.execute(
+        "SELECT retry_reason, COUNT(*) c FROM history WHERE created_at >= ? AND platform IN ('抖音', 'douyin') AND retry_reason != '' GROUP BY retry_reason ORDER BY c DESC",
+        (since,),
+    ).fetchall()
+    retry_reasons = [{"reason": r["retry_reason"], "count": r["c"]} for r in retry_reason_rows]
+    alert_kind = "success_rate" if valid_total and (service_failures / valid_total) > 0.1 else ("p95" if p95 > 5000 else "")
+    if alert_kind:
+        message = "成功率低于 90%" if alert_kind == "success_rate" else "P95 耗时超过 5 秒"
+        recent = conn.execute("SELECT 1 FROM admin_alerts WHERE kind = ? AND created_at >= ? LIMIT 1", (alert_kind, (datetime.now() - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S"))).fetchone()
+        if not recent:
+            conn.execute("INSERT INTO admin_alerts(kind, message, value, created_at) VALUES (?,?,?,?)", (alert_kind, message, float(p95 if alert_kind == "p95" else 0), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+    conn.close()
     return jsonify({
         "success": True,
+        "range": window,
         "total": total,
         "avg_duration_ms": round(row["avg_ms"] or 0),
+        "p95_duration_ms": round(p95),
         "cache_hits": hits,
         "cache_hit_rate": round(hits / total * 100, 1) if total else 0,
         "batch_concurrency": EXTRACT_CONCURRENCY,
         "queue_concurrency": GLOBAL_EXTRACT_CONCURRENCY,
+        "douyin_retry_success_attempts": retry_success_attempts,
+        "douyin_retry_reasons": retry_reasons,
     })
 
 
@@ -793,12 +1018,14 @@ def api_admin_recent():
     if not _admin_require_rate(ip):
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
 
+    _, _, since = _admin_window()
     conn = _get_db()
     rows = conn.execute(
         """
         SELECT platform, status, error, created_at FROM history
+        WHERE created_at >= ?
         ORDER BY id DESC LIMIT 50
-        """
+        """, (since,)
     ).fetchall()
     conn.close()
     items = []
@@ -810,6 +1037,46 @@ def api_admin_recent():
             "created_at": r["created_at"],
         })
     return jsonify({"success": True, "items": items})
+
+
+@app.route("/api/admin/alerts", methods=["GET"])
+def api_admin_alerts():
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    conn = _get_db()
+    rows = conn.execute("SELECT kind, message, value, created_at FROM admin_alerts ORDER BY id DESC LIMIT 20").fetchall()
+    conn.close()
+    return jsonify({"success": True, "items": [dict(r) for r in rows]})
+
+
+@app.route("/api/admin/audit", methods=["GET"])
+def api_admin_audit():
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    conn = _get_db()
+    rows = conn.execute("SELECT action, ip, created_at FROM admin_audit ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    return jsonify({"success": True, "items": [dict(r) for r in rows]})
+
+
+@app.route("/api/admin/export.csv", methods=["GET"])
+def api_admin_export_csv():
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    _, _, since = _admin_window()
+    conn = _get_db()
+    rows = conn.execute("SELECT platform, status, outcome_class, error, duration_ms, cache_hit, created_at FROM history WHERE created_at >= ? ORDER BY id DESC", (since,)).fetchall()
+    conn.close()
+    out = io.StringIO(); writer = csv.writer(out)
+    writer.writerow(["platform", "status", "outcome_class", "error", "duration_ms", "cache_hit", "created_at"])
+    writer.writerows([tuple(r) for r in rows])
+    response = make_response(out.getvalue().encode("utf-8-sig"))
+    response.headers["Content-Type"] = "text/csv; charset=utf-8"
+    response.headers["Content-Disposition"] = "attachment; filename=link-extractor-report.csv"
+    return response
 
 
 # ---------------------------------------------------------------- 封面代理

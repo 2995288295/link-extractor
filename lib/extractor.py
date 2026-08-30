@@ -13,6 +13,8 @@ import ipaddress
 import hashlib
 import json
 import logging
+import os
+import random
 import re
 import sqlite3
 import socket
@@ -22,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -34,14 +36,19 @@ logger = logging.getLogger(__name__)
 _session_local = threading.local()
 
 
+def _new_session() -> requests.Session:
+    """创建独立会话；风控重试不能复用原会话的 Cookie。"""
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 def _get_session() -> requests.Session:
     """每线程一个 Session（连接池复用），线程安全。"""
     if not hasattr(_session_local, "session"):
-        s = requests.Session()
-        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=0)
-        s.mount("https://", adapter)
-        s.mount("http://", adapter)
-        _session_local.session = s
+        _session_local.session = _new_session()
     return _session_local.session
 
 
@@ -58,15 +65,26 @@ def _cache_key(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def _public_work_cache_key(platform: str, post_id: str) -> str:
+    """为公开且稳定的抖音作品生成跨分享形式的缓存键。"""
+    return hashlib.sha256(f"public-work:{platform}:{post_id}".encode("utf-8")).hexdigest()
+
+
 def _extract_post_id_from_url(url: str) -> str:
     """从 URL 预提取作品 ID（不发请求）：抖音 video/note/数字ID；小红书 explore/discovery/item/ID。"""
     try:
         path = urlparse(url).path
     except Exception:
         return ""
-    if "douyin" in url:
-        m = re.search(r"/(?:video|note)/(\d+)", path)
-        return m.group(1) if m else ""
+    if "douyin" in url.lower():
+        m = re.search(r"/(?:video|note|share/(?:video|slides|note))/(\d+)", path, re.I)
+        if m:
+            return m.group(1)
+        query = parse_qs(urlparse(url).query)
+        for key in ("modal_id", "aweme_id", "item_id"):
+            value = (query.get(key) or [""])[0]
+            if re.fullmatch(r"\d{8,}", value):
+                return value
     if "xiaohongshu" in url or "xhslink" in url:
         m = re.search(r"/(?:explore|discovery/item)/([0-9A-Za-z]+)", path)
         return m.group(1) if m else ""
@@ -143,12 +161,23 @@ DOUYIN_MOBILE_HEADERS = {
     )
 }
 
+DOUYIN_RETRY_MODE = os.environ.get("DOUYIN_RETRY_MODE", "adaptive").strip().lower()
+DOUYIN_ADAPTIVE_DELAY_MIN = 0.4
+DOUYIN_ADAPTIVE_DELAY_MAX = 0.8
+
 XHS_HEADERS = {
     "User-Agent": DEFAULT_UA,
     "Accept": "text/html,*/*",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Referer": "https://www.xiaohongshu.com/",
 }
+
+# 每个 Gunicorn worker 内串行化小红书页面请求，并保留很短的自然间隔。
+# 批量任务此前只有通用抖动，多个线程仍可能同时打到小红书而触发临时验证页。
+_xhs_request_slot = threading.BoundedSemaphore(1)
+_xhs_schedule_lock = threading.Lock()
+_xhs_next_request_at = 0.0
+XHS_MIN_REQUEST_GAP_SECONDS = 0.25
 
 _dns_cache: dict[str, tuple[tuple[str, ...], float]] = {}
 _dns_cache_lock = threading.Lock()
@@ -344,7 +373,9 @@ class ExtractResult:
     post_id: str = ""             # 作品 ID（缓存键）
     error: str = ""
     hint: str = ""
+    partial: bool = False           # 链接已转换，但平台内容字段未完整取到
     cache_hit: bool = False
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """转为可缓存/可序列化的字典。"""
@@ -363,7 +394,9 @@ class ExtractResult:
             "post_id": self.post_id,
             "error": self.error,
             "hint": self.hint,
+            "partial": self.partial,
             "cache_hit": self.cache_hit,
+            "telemetry": self.telemetry,
         }
 
     @classmethod
@@ -383,7 +416,9 @@ class ExtractResult:
             post_id=d.get("post_id", ""),
             error=d.get("error", ""),
             hint=d.get("hint", ""),
+            partial=d.get("partial", False),
             cache_hit=d.get("cache_hit", False),
+            telemetry=d.get("telemetry", {}) or {},
         )
 
 
@@ -395,23 +430,85 @@ def _parse_douyin_video_info(html: str) -> Optional[dict[str, Any]]:
     注意：抖音风控时可能返回「有 _ROUTER_DATA 标记但 loaderData 是占位/不完整」的页面，
     因此不能只看正则是否匹配，必须校验能否解析出 videoInfoRes。
     """
-    pattern = re.compile(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", flags=re.DOTALL)
-    match = pattern.search(html)
-    if not match:
+    # 抖音页面会在 JSON 结尾附加分号，不能直接把整个 script 内容交给
+    # json.loads；raw_decode 可以安全读取首个 JSON 值并忽略尾部脚本字符。
+    patterns = (
+        r"window\._ROUTER_DATA\s*=\s*",
+        r"window\._SSR_DATA\s*=\s*",
+    )
+
+    def _walk(value: Any) -> Optional[dict[str, Any]]:
+        if isinstance(value, dict):
+            candidate = value.get("videoInfoRes")
+            if isinstance(candidate, dict) and (candidate.get("item_list") or candidate.get("filter_list")):
+                return candidate
+            for child in value.values():
+                found = _walk(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = _walk(child)
+                if found:
+                    return found
         return None
-    try:
-        data = json.loads(match.group(1).strip())
-    except (ValueError, TypeError):
-        return None
-    loader_data = data.get("loaderData") or {}
-    for key in ("video_(id)/page", "note_(id)/page"):
-        page = loader_data.get(key) or {}
-        if page.get("videoInfoRes"):
-            return page["videoInfoRes"]
+
+    for prefix in patterns:
+        for match in re.finditer(prefix, html, flags=re.DOTALL):
+            blob = html[match.end():]
+            try:
+                data, _end = json.JSONDecoder().raw_decode(blob.lstrip())
+            except (ValueError, TypeError):
+                continue
+            found = _walk(data)
+            if found:
+                return found
     return None
 
 
-def _extract_douyin(url: str) -> dict[str, Any]:
+def _classify_douyin_retry_response(html: str, parsed: Optional[dict[str, Any]]) -> str:
+    """给重试结果打轻量标签，便于区分风控、占位页和不可用作品。"""
+    if parsed:
+        if parsed.get("item_list"):
+            return "success"
+        if parsed.get("filter_list"):
+            return "unavailable_content"
+        return "empty_video_info"
+    text = (html or "").lower()
+    if any(token in text for token in ("验证码", "captcha", "challenge", "sec_verify", "verifycenter")):
+        return "challenge_page"
+    if "_router_data" in text or "_ssr_data" in text:
+        return "placeholder_router_data"
+    return "missing_video_info"
+
+
+def _douyin_target(url: str) -> tuple[str, str]:
+    """返回 (作品类型, ID)，并明确区分视频、图集和用户主页。"""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    match = re.search(r"/(video|note)/(\d+)$", path, re.I)
+    if match:
+        return match.group(1).lower(), match.group(2)
+    match = re.search(r"/share/(video|slides|note)/(\d+)$", path, re.I)
+    if match:
+        kind = "note" if match.group(1).lower() in ("slides", "note") else "video"
+        return kind, match.group(2)
+    query = parse_qs(parsed.query)
+    for key in ("modal_id", "aweme_id", "item_id"):
+        value = (query.get(key) or [""])[0]
+        if re.fullmatch(r"\d{8,}", value):
+            return "video", value
+    match = re.search(r"/(?:share/)?user/([^/]+)$", path, re.I)
+    if match:
+        return "user", unquote(match.group(1))
+    for key in ("sec_uid", "sec_user_id"):
+        value = (query.get(key) or [""])[0]
+        if value:
+            return "user", value
+    return "unknown", ""
+
+
+def _extract_douyin(url: str, telemetry: Optional[dict[str, int]] = None) -> dict[str, Any]:
     """抖音提取：移动端分享页 _ROUTER_DATA JSON 解析。
 
     SDK 原版策略：Session 保持 cookie + 首次响应优先解析；解析不出
@@ -422,33 +519,112 @@ def _extract_douyin(url: str) -> dict[str, Any]:
     source_url = _extract_first_url(url)
     session = _get_session()
 
-    # 首次请求：手动跟随重定向到最终分享页（每跳校验目标安全）
-    share_response, final_url = _safe_follow_redirects(session, source_url, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
-    video_id = final_url.split("?")[0].strip("/").split("/")[-1]
-    share_kind = "note" if "/note/" in final_url else "video"
-    share_url = f"https://www.iesdouyin.com/share/{share_kind}/{video_id}"
+    # 首次请求：手动跟随重定向到最终分享页（每跳校验目标安全）。
+    request_started = time.perf_counter()
+    share_response, final_url = _safe_follow_redirects(
+        session, source_url, headers=DOUYIN_MOBILE_HEADERS, timeout=30
+    )
+    if telemetry is not None:
+        telemetry["initial_request_ms"] = round((time.perf_counter() - request_started) * 1000)
+    share_kind, video_id = _douyin_target(final_url)
+    if share_kind == "user":
+        profile_url = f"https://www.douyin.com/user/{quote(video_id, safe='._-')}"
+        return {
+            "platform": "douyin",
+            "title": "抖音用户主页",
+            "caption": "",
+            "author_name": "",
+            "publish_time": "",
+            "like_count": 0,
+            "video_url": profile_url,
+            "canonical_url": profile_url,
+            "cover_url": None,
+            "post_id": video_id,
+            "partial": True,
+            "hint": "链接已转换为抖音用户主页；主页不包含单条作品的文案和数据",
+        }
+    if not video_id:
+        share_kind, video_id = _douyin_target(source_url)
+    if share_kind == "user":
+        profile_url = f"https://www.douyin.com/user/{quote(video_id, safe='._-')}"
+        return {
+            "platform": "douyin",
+            "title": "抖音用户主页",
+            "caption": "",
+            "author_name": "",
+            "publish_time": "",
+            "like_count": 0,
+            "video_url": profile_url,
+            "canonical_url": profile_url,
+            "cover_url": None,
+            "post_id": video_id,
+            "partial": True,
+            "hint": "链接已转换为抖音用户主页；主页不包含单条作品的文案和数据",
+        }
+    if not video_id:
+        raise ValueError("抖音链接未包含可识别的作品 ID，可能是直播、商品或失效链接")
 
+    share_url = f"https://www.iesdouyin.com/share/{share_kind}/{video_id}"
+    parse_started = time.perf_counter()
     video_info_res = _parse_douyin_video_info(share_response.text)
-    if not video_info_res:
-        # 第二次请求：构造的 iesdouyin share URL
-        response, _final = _safe_follow_redirects(session, share_url, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
-        video_info_res = _parse_douyin_video_info(response.text)
-    if not video_info_res:
-        # 仍无数据：大概率是 JS 挑战页/占位页风控，等待后带新会话重试一次
-        time.sleep(1.5)
-        session2 = _get_session()
-        for target in (share_url, source_url):
+    retry_outcomes: list[str] = [_classify_douyin_retry_response(share_response.text, video_info_res)]
+    successful_attempt = 1 if video_info_res and video_info_res.get("item_list") else 0
+    if telemetry is not None:
+        telemetry["initial_parse_ms"] = round((time.perf_counter() - parse_started) * 1000)
+
+    # 首次页面无数据时，用真正的新会话重试，避免沿用原会话中的风控 Cookie。
+    fresh_sessions: list[requests.Session] = []
+    attempts: list[tuple[requests.Session, str]] = [(session, share_url)]
+    for target in (share_url, source_url):
+        fresh = _new_session()
+        fresh_sessions.append(fresh)
+        attempts.append((fresh, target))
+    try:
+        retry_wait_ms = retry_request_ms = retry_parse_ms = 0
+        for attempt_no, (attempt_session, target) in enumerate(attempts):
+            if video_info_res:
+                break
+            if attempt_no:
+                wait_started = time.perf_counter()
+                if DOUYIN_RETRY_MODE == "legacy":
+                    time.sleep(1.2 * attempt_no)
+                elif attempt_no >= 2:
+                    time.sleep(random.uniform(DOUYIN_ADAPTIVE_DELAY_MIN, DOUYIN_ADAPTIVE_DELAY_MAX))
+                retry_wait_ms += round((time.perf_counter() - wait_started) * 1000)
             try:
-                resp, _fin = _safe_follow_redirects(session2, target, headers=DOUYIN_MOBILE_HEADERS, timeout=30)
-                video_info_res = _parse_douyin_video_info(resp.text)
-                if video_info_res:
+                request_started = time.perf_counter()
+                response, _final = _safe_follow_redirects(
+                    attempt_session, target, headers=DOUYIN_MOBILE_HEADERS, timeout=30
+                )
+                retry_request_ms += round((time.perf_counter() - request_started) * 1000)
+                parse_started = time.perf_counter()
+                video_info_res = _parse_douyin_video_info(response.text)
+                retry_parse_ms += round((time.perf_counter() - parse_started) * 1000)
+                outcome = _classify_douyin_retry_response(response.text, video_info_res)
+                retry_outcomes.append(outcome)
+                if outcome == "success":
+                    successful_attempt = attempt_no + 2
+                # 作品明确不可用时不再继续请求，重试只对风控/占位页有意义。
+                if outcome == "unavailable_content":
                     break
-            except Exception:
-                continue
+            except (requests.RequestException, RuntimeError, ValueError) as exc:
+                retry_outcomes.append("request_error")
+                logger.info("抖音第 %d 次请求/响应不可用: %s", attempt_no + 1, exc)
+        if telemetry is not None:
+            telemetry["retry_count"] = max(0, len(retry_outcomes) - 1)
+            telemetry["success_attempt"] = successful_attempt
+            telemetry["retry_outcomes"] = retry_outcomes
+            telemetry["retry_reason"] = retry_outcomes[0] if retry_outcomes else "unknown"
+            telemetry["retry_mode"] = DOUYIN_RETRY_MODE
+            telemetry["retry_wait_ms"] = retry_wait_ms
+            telemetry["retry_request_ms"] = retry_request_ms
+            telemetry["retry_parse_ms"] = retry_parse_ms
+    finally:
+        for fresh in fresh_sessions:
+            fresh.close()
+
     if not video_info_res:
-        raise ValueError(
-            "从抖音 HTML 中解析视频信息失败（页面可能触发风控验证，请稍后重试）"
-        )
+        raise ValueError("抖音页面触发验证，暂时无法获取完整文案，请稍后重试")
 
     item_list = video_info_res.get("item_list") or []
     if not item_list:
@@ -509,13 +685,43 @@ def _extract_douyin(url: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- 小红书提取
 
-def _extract_xhs_initial_state(url: str) -> dict[str, Any]:
+class XhsAccessDeniedError(ValueError):
+    """小红书将作品页跳到登录页时使用，属于不可通过重试恢复的失败。"""
+
+
+def _run_xhs_request(callback, telemetry: dict[str, int]):
+    """限制同一 worker 的小红书页面请求节奏，返回回调结果。"""
+    global _xhs_next_request_at
+    queued_at = time.perf_counter()
+    _xhs_request_slot.acquire()
+    try:
+        with _xhs_schedule_lock:
+            wait_seconds = max(0.0, _xhs_next_request_at - time.monotonic())
+            _xhs_next_request_at = max(time.monotonic(), _xhs_next_request_at) + XHS_MIN_REQUEST_GAP_SECONDS
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        telemetry["xhs_rate_limit_wait_ms"] = telemetry.get("xhs_rate_limit_wait_ms", 0) + round(
+            (time.perf_counter() - queued_at) * 1000
+        )
+        return callback()
+    finally:
+        _xhs_request_slot.release()
+
+
+def _extract_xhs_initial_state(
+    url: str, *, session: Optional[requests.Session] = None
+) -> dict[str, Any]:
     """小红书提取：__INITIAL_STATE__ 页面状态解析（信息最全）。"""
     source_url = _extract_first_url(url)
     response, final_url = _safe_follow_redirects(
-        _get_session(), source_url, headers=XHS_HEADERS, timeout=30
+        session or _get_session(), source_url, headers=XHS_HEADERS, timeout=30
     )
     response.raise_for_status()
+
+    if urlparse(final_url).path.rstrip("/") == "/login":
+        raise XhsAccessDeniedError(
+            "小红书要求登录或分享凭证已失效，请从 App 重新复制最新链接"
+        )
 
     html = response.text
     state_match = re.search(
@@ -581,13 +787,21 @@ def _extract_xhs_initial_state(url: str) -> dict[str, Any]:
     }
 
 
-def _extract_xhs_lightweight(url: str) -> dict[str, Any]:
+def _extract_xhs_lightweight(
+    url: str, *, session: Optional[requests.Session] = None
+) -> dict[str, Any]:
     """小红书轻量兜底：meta 标签解析（无 __INITIAL_STATE__ 时使用）。"""
     source_url = _extract_first_url(url)
-    resp = _safe_get_with_redirects(url, headers=XHS_HEADERS, timeout=10)
+    resp, final_url = _safe_follow_redirects(
+        session or _get_session(), source_url, headers=XHS_HEADERS, timeout=10
+    )
     resp.encoding = "utf-8"
 
-    if "404" in resp.url or "error_code" in resp.url or "error_msg" in resp.url:
+    if urlparse(final_url).path.rstrip("/") == "/login":
+        raise XhsAccessDeniedError(
+            "小红书要求登录或分享凭证已失效，请从 App 重新复制最新链接"
+        )
+    if "404" in final_url or "error_code" in final_url or "error_msg" in final_url:
         raise RuntimeError(
             "小红书链接无效或缺少 xsec_token 参数。\n"
             "请使用小红书 App「复制链接」功能获取分享链接（包含 xsec_token 参数），\n"
@@ -595,6 +809,30 @@ def _extract_xhs_lightweight(url: str) -> dict[str, Any]:
         )
 
     html = resp.text
+
+    json_ld: dict[str, Any] = {}
+    for blob in re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            candidate = json.loads(blob.strip())
+        except (TypeError, ValueError):
+            continue
+        candidates = candidate if isinstance(candidate, list) else [candidate]
+        if isinstance(candidate, dict) and isinstance(candidate.get("@graph"), list):
+            candidates += candidate["@graph"]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("@type")
+            types = {item_type} if isinstance(item_type, str) else set(item_type or [])
+            if types & {"SocialMediaPosting", "Article", "VideoObject", "ImageObject"}:
+                json_ld = item
+                break
+        if json_ld:
+            break
 
     def _mg(pattern):
         m = re.search(pattern, html, re.I | re.S)
@@ -609,7 +847,10 @@ def _extract_xhs_lightweight(url: str) -> dict[str, Any]:
         or _mg(
             r'<meta[^>]*?\b(?:property|name)=["\']og:description["\'][^>]*?content=["\']([^"\']+)["\']'
         )
+        or str(json_ld.get("articleBody") or json_ld.get("description") or "").strip()
     )
+    if not title:
+        title = str(json_ld.get("headline") or json_ld.get("name") or "").strip()
 
     author_name = _mg(r'<meta[^>]*?\bname=["\']author["\'][^>]*?content=["\']([^"\']+)["\']')
     if not author_name:
@@ -618,15 +859,20 @@ def _extract_xhs_lightweight(url: str) -> dict[str, Any]:
         parts = page_title.split(" - ") if " - " in page_title else page_title.split(" | ")
         if len(parts) >= 2 and len(parts[-1]) < 20:
             author_name = parts[-1].strip()
+    if not author_name:
+        author = json_ld.get("author") or {}
+        author_name = str(author.get("name") if isinstance(author, dict) else author or "").strip()
 
     publish_time = _mg(
         r'<meta[^>]*?\b(?:property|name)=["\'](?:article:published_time|datePublished)["\'][^>]*?content=["\']([^"\']+)["\']'
     )
     if not publish_time:
         publish_time = _mg(r'"time"\s*:\s*"([^"]+)"')
+    if not publish_time:
+        publish_time = str(json_ld.get("datePublished") or json_ld.get("uploadDate") or "").strip()
 
     note_id = ""
-    m = re.search(r"/(?:explore|discovery/item)/([^/?]+)", resp.url)
+    m = re.search(r"/(?:explore|discovery/item)/([^/?]+)", final_url)
     if m:
         note_id = m.group(1)
 
@@ -637,11 +883,80 @@ def _extract_xhs_lightweight(url: str) -> dict[str, Any]:
         "author_name": author_name,
         "publish_time": publish_time,
         "like_count": 0,
-        "video_url": resp.url,
+        "video_url": final_url,
         "cover_url": "",
         "post_id": note_id,
-        "xsec_token": _extract_xsec_token(resp.url) or _extract_xsec_token(source_url),
+        "xsec_token": _extract_xsec_token(final_url) or _extract_xsec_token(source_url),
     }
+
+
+def _extract_xhs_with_retries(url: str, telemetry: dict[str, int]) -> dict[str, Any]:
+    """用独立会话重试小红书页面，避免临时空状态被当成无文案作品。"""
+    attempts = 3
+    last_data: Optional[dict[str, Any]] = None
+    last_error: Optional[Exception] = None
+    retry_wait_ms = 0
+    request_ms = 0
+
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            delay = random.uniform(0.4, 0.8)
+            time.sleep(delay)
+            retry_wait_ms += round(delay * 1000)
+
+        # 首次复用连接池；重试强制使用无 Cookie 的新会话，避免复用平台临时状态。
+        session = _get_session() if attempt == 1 else _new_session()
+        try:
+            started = time.perf_counter()
+            data = _run_xhs_request(
+                lambda: _extract_xhs_initial_state(url, session=session), telemetry
+            )
+            request_ms += round((time.perf_counter() - started) * 1000)
+            last_data = data
+            if str(data.get("caption") or "").strip():
+                telemetry["xhs_attempt_count"] = attempt
+                telemetry["xhs_success_attempt"] = attempt
+                telemetry["xhs_retry_wait_ms"] = retry_wait_ms
+                telemetry["xhs_request_parse_ms"] = request_ms
+                return data
+            last_error = ValueError("小红书页面暂未返回正文")
+            logger.info("小红书第 %d 次请求拿到作品但正文为空", attempt)
+        except XhsAccessDeniedError:
+            # 登录页/失效分享凭证不会因更换会话而恢复，立即反馈用户重新复制链接。
+            raise
+        except Exception as exc:
+            request_ms += round((time.perf_counter() - started) * 1000)
+            last_error = exc
+            logger.info("小红书第 %d 次 INITIAL_STATE 解析失败: %s", attempt, exc)
+        finally:
+            if attempt > 1:
+                session.close()
+
+    # INITIAL_STATE 不可用时才走 meta 兜底；meta 有正文也可作为完整成功结果。
+    fallback_session = _new_session()
+    try:
+        started = time.perf_counter()
+        fallback_data = _run_xhs_request(
+            lambda: _extract_xhs_lightweight(url, session=fallback_session), telemetry
+        )
+        telemetry["xhs_fallback_ms"] = round((time.perf_counter() - started) * 1000)
+    except Exception as exc:
+        last_error = exc
+    finally:
+        fallback_session.close()
+
+    telemetry["xhs_attempt_count"] = attempts
+    telemetry["xhs_retry_wait_ms"] = retry_wait_ms
+    telemetry["xhs_request_parse_ms"] = request_ms
+    if "fallback_data" in locals() and str(fallback_data.get("caption") or "").strip():
+        telemetry["xhs_success_attempt"] = attempts + 1
+        return fallback_data
+    if last_data:
+        # 仅作为最终降级结果，让调用方保留可识别作品并提示稍后重试补文案。
+        return last_data
+    if last_error:
+        raise last_error
+    raise ValueError("小红书未返回可解析的作品信息")
 
 
 # ---------------------------------------------------------------- 汇总
@@ -664,13 +979,11 @@ def _fmt_ts(ts) -> str:
 
 
 def _clean_caption(text: str) -> str:
-    """清洗文案：去掉小红书 [话题] 标签、> 引用前缀。"""
-    if not text:
-        return ""
-    text = re.sub(r"\[话题\]\s*#?\s*", " ", text)
-    text = re.sub(r"^>.*\n?", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    """生成可直接提交的文案；仅移除小红书话题内部标记。"""
+    caption = str(text or "").strip()
+    # 小红书接口有时把普通话题返回成「#标签[话题]#」。
+    # 只匹配完整的标签结构，保留标签文字、顺序、换行和其他正文。
+    return re.sub(r"#([^\s#\[\]]+)\[话题\]#", r"#\1#", caption)
 
 
 def extract_link(raw: str) -> ExtractResult:
@@ -681,6 +994,8 @@ def extract_link(raw: str) -> ExtractResult:
     - 抖音：移动分享页 JSON 解析
     - 小红书：__INITIAL_STATE__ → meta 轻量兜底
     """
+    started = time.perf_counter()
+    telemetry: dict[str, int] = {}
     # 1. 从混合文本中提取 URL（兼容整段复制粘贴）
     try:
         url = _extract_first_url(raw)
@@ -689,6 +1004,7 @@ def extract_link(raw: str) -> ExtractResult:
             success=False,
             error=str(e),
             hint="请粘贴抖音或小红书的分享链接（App 内复制链接）",
+            telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
 
     # 2. 校验域名
@@ -697,6 +1013,7 @@ def extract_link(raw: str) -> ExtractResult:
             success=False,
             error="不支持的链接，仅支持抖音和小红书链接",
             hint="请粘贴抖音或小红书的分享链接（App 内复制链接）",
+            telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
 
     try:
@@ -707,34 +1024,60 @@ def extract_link(raw: str) -> ExtractResult:
         # 缓存优化：先从 URL 预提取作品 ID 查缓存（同一视频不同链接命中秒回）
         post_id = _extract_post_id_from_url(url)
         cache_key = _cache_key(url)
-        cached = cache_get(cache_key)
+        cache_keys = [cache_key]
+        # 公开作品 ID 的完整提取结果可跨分享形式复用，降低平台偶发验证导致的重复失败。
+        # 小红书共享缓存不保存分享参数，命中时再用本次输入链接生成规范链接。
+        if post_id:
+            cache_keys.append(_public_work_cache_key("xiaohongshu" if is_xhs else "douyin", post_id))
+        cache_started = time.perf_counter()
+        cached = None
+        for candidate_key in cache_keys:
+            cached = cache_get(candidate_key)
+            if cached:
+                break
+        telemetry["cache_lookup_ms"] = round((time.perf_counter() - cache_started) * 1000)
         if cached:
             logger.info("缓存命中: %s", cache_key[:10])
             result = ExtractResult.from_dict(cached)
-            result.cache_hit = True
-            return result
+            normalized_caption = _clean_caption(result.caption)
+            if normalized_caption != result.caption:
+                # 兼容规则上线前的共享缓存：规范化后立即回写，后续请求无需重复处理。
+                result.caption = normalized_caption
+                cache_put(cache_key, result.to_dict())
+            if not result.caption.strip() or result.partial:
+                logger.info("忽略无完整文案的缓存结果: %s", cache_key[:10])
+            else:
+                if is_xhs and result.post_id:
+                    result.canonical_url = _canonicalize_media_url("xiaohongshu", url, result.post_id)
+                result.cache_hit = True
+                result.telemetry = {**telemetry, "total_ms": round((time.perf_counter() - started) * 1000)}
+                logger.info("性能分解 [%s] cache_hit=1 total=%dms cache=%dms", result.platform_raw or "unknown", result.telemetry["total_ms"], telemetry["cache_lookup_ms"])
+                return result
 
         if is_xhs:
             # 小红书：先解析短链判断 token 情况（小红书短链较多）
+            resolve_started = time.perf_counter()
             resolved = _resolve_short_link(url)
-            # 小红书缺 xsec_token 时直接报友好错误
-            if "/explore/" in resolved and "xsec_token" not in resolved and "xhslink" not in resolved:
-                return ExtractResult(
-                    success=False,
-                    error="小红书链接缺少 xsec_token 参数",
-                    hint="请使用小红书 App「复制链接」获取分享链接（包含 xsec_token）",
-                )
-            try:
-                data = _extract_xhs_initial_state(resolved)
-            except Exception:
-                logger.info("小红书 INITIAL_STATE 解析失败，走轻量兜底")
-                data = _extract_xhs_lightweight(resolved)
+            telemetry["redirect_ms"] = round((time.perf_counter() - resolve_started) * 1000)
+            data = _extract_xhs_with_retries(resolved, telemetry)
         else:
-            data = _extract_douyin(url)
+            external_started = time.perf_counter()
+            data = _extract_douyin(url, telemetry)
+            telemetry["platform_total_ms"] = round((time.perf_counter() - external_started) * 1000)
 
         platform = data["platform"]
+        # 有些公开作品可解析出作品 ID 和规范链接，但平台页面暂时不返回正文。
+        # 这种情况不应把整条链接判为失败：保留可用的转换结果，并明确标记为
+        # “文案待补”，用户可以稍后用前端的单条重试补齐文案。
+        missing_caption = not str(data.get("caption") or "").strip()
         post_id = data.get("post_id", "") or post_id
-        canonical = _canonicalize_media_url(platform, data.get("video_url") or (resolved if is_xhs else url), post_id)
+        canonical = data.get("canonical_url") or _canonicalize_media_url(
+            platform, data.get("video_url") or (resolved if is_xhs else url), post_id
+        )
+        # 只有拿到稳定作品 ID 时，才允许降级为“已转换、文案待补”。
+        # 若连作品 ID 都没有，通常是失效短链、登录页或平台错误页，不能误报成功。
+        if missing_caption and not post_id:
+            raise ValueError("平台未返回可识别的作品信息，请确认链接未失效或重新从 App 复制")
 
         result = ExtractResult(
             success=True,
@@ -749,24 +1092,45 @@ def extract_link(raw: str) -> ExtractResult:
             canonical_url=canonical,
             cover_url=data.get("cover_url", ""),
             post_id=post_id,
+            hint=(
+                data.get("hint", "")
+                or ("链接已转换，但平台暂未返回完整文案；可稍后重试这条链接补齐文案。" if missing_caption else "")
+            ),
+            partial=bool(data.get("partial", False)) or missing_caption,
         )
         # 写入作品缓存（同一作品后续命中）
         if post_id:
+            cache_write_started = time.perf_counter()
             cache_put(cache_key, result.to_dict())
+            if not result.partial and result.caption.strip():
+                public_result = result.to_dict()
+                if platform == "xiaohongshu":
+                    # 分享参数可能包含来源标识，不放入跨链接共享缓存。
+                    public_result["canonical_url"] = _canonicalize_media_url("xiaohongshu", "", post_id)
+                cache_put(_public_work_cache_key(platform, post_id), public_result)
+            telemetry["cache_write_ms"] = round((time.perf_counter() - cache_write_started) * 1000)
+        telemetry["total_ms"] = round((time.perf_counter() - started) * 1000)
+        result.telemetry = telemetry
+        logger.info("性能分解 [%s] %s", platform, " ".join(f"{k}={v}ms" for k, v in telemetry.items() if k.endswith("_ms")))
         return result
     except Exception as e:
         # 已知业务错误（作品不存在/缺参数等）对用户有用，保留友好文案；只进日志，不泄露堆栈
         if isinstance(e, (ValueError, RuntimeError)):
             logger.warning("提取失败: %s | 原因: %s", url[:80], e)
+            telemetry["total_ms"] = round((time.perf_counter() - started) * 1000)
+            logger.info("性能分解 [failed] %s", " ".join(f"{k}={v}ms" for k, v in telemetry.items() if k.endswith("_ms")))
             return ExtractResult(
                 success=False,
                 error=f"提取失败: {str(e)}",
                 hint="请检查链接是否正确、作品是否公开可见、小红书链接是否带 xsec_token",
+                telemetry=telemetry,
             )
         # 未知异常：脱敏，仅记录详细日志（路径/库名/堆栈不外泄）
         logger.exception("提取失败(异常): %s", url[:80])
+        telemetry["total_ms"] = round((time.perf_counter() - started) * 1000)
         return ExtractResult(
             success=False,
             error="提取失败，请稍后重试",
             hint="请检查链接是否正确、作品是否公开可见",
+            telemetry=telemetry,
         )

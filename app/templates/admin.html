@@ -6,46 +6,60 @@
 <title>运营看板 · 链接提取工具</title>
 <style>
 :root {
-  --bg: #f3f6fa;
-  --card: #ffffff;
-  --border: #dbe3ee;
-  --text: #16263b;
-  --text2: #52657a;
-  --primary: #1769e0;
-  --primary-soft: #e8f0fe;
-  --success: #137a4a;
-  --error: #ba2b3d;
-  --radius: 12px;
+  --bg: #eef1f4;
+  --card: #fbfcfd;
+  --border: #cbd5dc;
+  --text: #16202a;
+  --text2: #5f6f7c;
+  --primary: #0f9fa8;
+  --primary-soft: #e1f3f4;
+  --success: #238b68;
+  --error: #d95c4a;
+  --warn: #b7791f;
+  --radius: 8px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: var(--bg); color: var(--text); line-height: 1.6;
 }
-.wrap { max-width: 920px; margin: 0 auto; padding: 24px 16px 40px; }
-header { text-align: center; margin-bottom: 22px; }
-.eyebrow { color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: .14em; }
-h1 { font-size: 22px; font-weight: 700; margin: 6px 0 4px; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 22px 20px 40px; }
+header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:18px; }
+.eyebrow { color: var(--primary); font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+h1 { font-size: 24px; font-weight: 760; margin: 4px 0 2px; letter-spacing: .01em; }
 header p { color: var(--text2); font-size: 13px; }
 .card {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px 18px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 2px rgba(22,32,42,.03);
 }
 .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
 .metric {
   background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 14px 16px;
+  padding: 13px 15px;
 }
 .metric .label { font-size: 12px; color: var(--text2); }
 .metric .value { font-size: 24px; font-weight: 700; margin-top: 2px; }
 .metric .sub { font-size: 11px; color: var(--text2); }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-@media (max-width: 720px) { .metrics { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+.performance-card .metrics { gap:0; margin:0; }
+.performance-card .metric { border:0; border-left:1px solid var(--border); border-radius:0; background:transparent; }
+.performance-card .metric:first-child { border-left:0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.grid2 > .card { min-width: 0; align-self: start; }
+.bottom-grid { align-items:stretch; }
+.bottom-grid > .card { height:420px; margin-bottom:0; }
+.bottom-grid .list-collapsed { max-height:300px; }
+.insight-grid { display:grid; grid-template-columns:1.25fr 1fr 1fr; gap:14px; align-items:stretch; }
+.insight-grid > .card { min-width:0; height:190px; margin-bottom:0; }
+@media (max-width: 860px) { .insight-grid { grid-template-columns:1fr 1fr; } .insight-grid > .card:first-child { grid-column:1 / -1; } }
+@media (max-width: 720px) { .metrics { grid-template-columns: repeat(2, 1fr); } .grid2, .insight-grid { grid-template-columns: 1fr; } .insight-grid > .card:first-child { grid-column:auto; } .insight-grid > .card { height:auto; min-height:170px; } .wrap { padding:16px 10px 28px; } }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table-scroll { max-height: 500px; overflow: auto; border-radius: 8px; }
+.table-scroll thead th { position: sticky; top: 0; background: var(--card); z-index: 1; }
 th { text-align: left; color: var(--text2); font-weight: 500; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 td { padding: 8px; border-bottom: 1px solid var(--border); }
 tr:last-child td { border-bottom: none; }
@@ -77,12 +91,13 @@ input {
 }
 input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,224,.14); }
 .btn {
-  border: none; border-radius: 8px; padding: 10px 18px; font-size: 14px; font-weight: 500;
+  border: 1px solid transparent; border-radius: 6px; padding: 9px 14px; font-size: 13px; font-weight: 650;
   cursor: pointer; width: 100%;
 }
 .btn-primary { background: var(--primary); color: #fff; }
-.btn-primary:hover { background: #1256ba; }
-.btn-ghost { background: #edf2f8; color: var(--text); width: auto; padding: 6px 12px; font-size: 12px; }
+.btn-primary:hover { background: #0b858c; }
+.btn-ghost { background: transparent; border-color: var(--border); color: var(--text); width: auto; padding: 7px 11px; font-size: 12px; }
+.btn-ghost:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
 .hidden { display: none !important; }
 .toast {
   position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
@@ -92,58 +107,122 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
 .toast.show { opacity: 1; }
 .footer { text-align: center; color: #9aa0a8; font-size: 11px; margin-top: 20px; }
 .empty { color: var(--text2); font-size: 13px; text-align: center; padding: 18px 0; }
+.toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:12px; }
+.range-select { width:auto; margin:0; padding:7px 10px; background:#fff; }
+.updated { color:var(--text2); font-size:12px; }
+.status-strip { display:flex; align-items:center; gap:9px; padding:10px 12px; border-radius:6px; border-left:3px solid var(--success); background:#eef8f3; color:var(--success); font-size:13px; margin-bottom:14px; }
+.status-dot { width:8px; height:8px; border-radius:50%; background:#18a866; box-shadow:0 0 0 4px rgba(24,168,102,.12); }
+.status-strip.warn { background:#fff7e6; color:#9a6500; }
+.status-strip.warn .status-dot { background:#e9a400; box-shadow:0 0 0 4px rgba(233,164,0,.14); }
+.status-strip.bad { background:#fff0f1; color:var(--error); }
+.status-strip.bad .status-dot { background:var(--error); box-shadow:0 0 0 4px rgba(186,43,61,.14); }
+.health-row { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px dashed #e6ecf4; font-size:13px; }
+.health-row:last-child { border-bottom:none; }
+.health-rate { font-weight:700; }
+.list-collapsed { max-height: 360px; overflow: hidden; position: relative; }
+.list-collapsed::after { content:""; position:absolute; left:0; right:0; bottom:0; height:42px; background:linear-gradient(transparent, var(--card)); pointer-events:none; }
+.list-expanded { max-height:none; }
+.list-expanded::after { display:none; }
+.more-row { display:flex; justify-content:center; padding-top:9px; }
+.more-row button { border:1px solid #b9e1e3; background:var(--primary-soft); color:var(--primary); border-radius:6px; padding:6px 12px; font-size:12px; font-weight:650; cursor:pointer; }
+.more-row button:hover { background:#d3edef; }
+.section-tools { display:flex; justify-content:space-between; align-items:center; gap:10px; margin:-4px 0 10px; }
+.section-tools input, .section-tools select { width:auto; margin:0; padding:6px 9px; font-size:12px; }
+.section-tools input { min-width:150px; }
+.action-tag { display:inline-block; margin-left:7px; padding:1px 6px; border-radius:4px; background:#fff4d8; color:#996400; font-size:11px; white-space:nowrap; }
+.chart-wrap { position:relative; }
+.chart-tip { position:absolute; display:none; z-index:3; pointer-events:none; padding:6px 8px; border-radius:7px; background:#16263b; color:#fff; font-size:11px; line-height:1.5; white-space:nowrap; box-shadow:0 5px 14px rgba(22,38,59,.18); }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div class="eyebrow">ADMIN DASHBOARD</div>
-    <h1>后台运营看板</h1>
-    <p id="subtitle">链接提取工具 · 全设备数据</p>
+    <div>
+      <div class="eyebrow">SIGNAL DESK / ADMIN</div>
+      <h1>后台运营看板</h1>
+      <p id="subtitle">链接提取工具 · 全设备数据</p>
+    </div>
+    <div class="updated" id="headerUptime">运行状态加载中</div>
   </header>
 
   <div id="content" class="hidden">
-    <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
-      <button class="btn btn-ghost" onclick="logout()">退出登录</button>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+      <button class="btn btn-ghost" onclick="logout()" title="结束当前管理员会话">退出登录</button>
     </div>
+
+    <div class="toolbar">
+      <div><span class="updated" id="updatedAt">尚未刷新</span></div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <select id="rangeSelect" class="range-select" aria-label="统计范围">
+          <option value="24h">最近 24 小时</option><option value="7d" selected>最近 7 天</option><option value="30d">最近 30 天</option>
+        </select>
+        <button class="btn btn-ghost" onclick="loadAll()" title="重新读取当前范围的数据">↻ 刷新</button>
+        <button class="btn btn-ghost" onclick="exportCsv()" title="下载当前范围的 CSV 报表">↓ 导出</button>
+      </div>
+    </div>
+
+    <div id="statusStrip" class="status-strip"><span class="status-dot"></span><span id="statusText">正在检查服务状态…</span></div>
 
     <div class="metrics">
       <div class="metric"><div class="label">总提取次数</div><div class="value" id="mTotal">-</div></div>
-      <div class="metric"><div class="label">成功率</div><div class="value" id="mRate">-</div></div>
-      <div class="metric"><div class="label">活跃设备</div><div class="value" id="mDevices">-</div></div>
+      <div class="metric"><div class="label">转换成功率</div><div class="value" id="mRate">-</div><div class="sub" id="mFail">失败 - · 服务稳定性 -</div></div>
+      <div class="metric"><div class="label">窗口活跃设备</div><div class="value" id="mDevices">-</div><div class="sub" id="mDevicesSub">7天 - · 30天 -</div></div>
       <div class="metric"><div class="label">今日提取</div><div class="value" id="mToday">-</div></div>
     </div>
 
-    <div class="grid2">
+    <div class="card performance-card">
+      <h2>性能与缓存</h2>
+      <div class="metrics" style="margin:0;grid-template-columns:repeat(4,1fr);">
+        <div class="metric"><div class="label">平均耗时</div><div class="value" id="pAvg">-</div><div class="sub">毫秒</div></div>
+      <div class="metric"><div class="label">P95 耗时</div><div class="value" id="p95">-</div><div class="sub">毫秒</div></div>
+        <div class="metric"><div class="label">缓存命中率</div><div class="value" id="pHit">-</div></div>
+        <div class="metric"><div class="label">批次 / 队列并发</div><div class="value" id="pBatch">-</div><div class="sub" id="pQueue">队列 -</div></div>
+      </div>
+      <div id="retryInsight" class="sub" style="margin-top:12px;color:var(--muted)">抖音重试成功分布：暂无数据</div>
+    </div>
+
+    <div class="insight-grid">
       <div class="card">
-        <h2>近 7 天提取趋势</h2>
-        <div id="trendChart"></div>
+        <h2 id="trendTitle">近 7 天提取趋势</h2>
+        <div class="chart-wrap"><div id="trendChart"></div><div id="chartTip" class="chart-tip"></div></div>
       </div>
       <div class="card">
         <h2>平台分布（成功）</h2>
         <div id="platformDist"></div>
       </div>
+      <div class="card">
+        <h2>平台健康度</h2>
+        <div id="platformHealth"></div>
+      </div>
     </div>
 
     <div class="card">
       <h2>设备使用排行</h2>
-      <div style="overflow-x:auto;">
+      <div class="section-tools">
+        <input id="deviceSearch" type="search" placeholder="搜索设备 ID" aria-label="搜索设备">
+        <select id="deviceSort" aria-label="设备排序"><option value="total">按提取数</option><option value="fail">按失败数</option><option value="rate">按成功率</option><option value="recent">按最近活跃</option></select>
+      </div>
+      <div class="table-scroll">
         <table>
           <thead><tr><th>设备</th><th class="num">提取数</th><th class="num">成功</th><th class="num">失败</th><th class="num">成功率</th><th>最后活跃</th></tr></thead>
           <tbody id="deviceBody"></tbody>
         </table>
       </div>
       <div id="deviceEmpty" class="empty hidden">暂无设备数据</div>
+      <div class="more-row"><button id="deviceMore" type="button">展开全部设备</button></div>
     </div>
 
-    <div class="grid2">
+    <div class="grid2 bottom-grid">
       <div class="card">
         <h2>失败原因 TOP</h2>
-        <div id="errorList"></div>
+        <div id="errorList" class="list-collapsed"></div>
+        <div class="more-row"><button id="errorMore" type="button">展开全部错误</button></div>
       </div>
       <div class="card">
         <h2>最近动态（脱敏）</h2>
-        <div id="recentList"></div>
+        <div class="section-tools"><select id="recentPlatform" aria-label="平台筛选"><option value="all">全部平台</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select><select id="recentStatus" aria-label="状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="error">失败</option></select></div>
+        <div id="recentList" class="list-collapsed"></div>
+        <div class="more-row"><button id="recentMore" type="button">展开全部动态</button></div>
       </div>
     </div>
   </div>
@@ -163,7 +242,8 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
 <div class="toast" id="toast"></div>
 
 <script>
-let adminToken = localStorage.getItem("admin_token") || "";
+let adminToken = "";
+const expanded = { devices: false, errors: false, recent: false };
 const overlay = document.getElementById("loginOverlay");
 const content = document.getElementById("content");
 
@@ -175,8 +255,16 @@ function showToast(msg) {
   t._timer = setTimeout(() => t.classList.remove("show"), 1600);
 }
 
+function readCookie(name) {
+  const item = document.cookie.split("; ").find(v => v.startsWith(name + "="));
+  return item ? decodeURIComponent(item.slice(name.length + 1)) : "";
+}
+
 async function adminFetch(url) {
-  const res = await fetch(url, { headers: { "X-Admin-Token": adminToken } });
+  const headers = adminToken ? { "X-Admin-Token": adminToken } : {};
+  const csrf = readCookie("csrf_token");
+  if (csrf) headers["X-CSRF-Token"] = csrf;
+  const res = await fetch(url, { headers, credentials: "same-origin" });
   if (res.status === 401 || res.status === 503) {
     throw new Error("unauthorized");
   }
@@ -189,29 +277,40 @@ async function login() {
   const input = document.getElementById("adminTokenInput");
   const val = input.value.trim();
   if (!val) return;
-  adminToken = val;
   try {
+    const res = await fetch("/api/admin/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      credentials: "same-origin", body: JSON.stringify({ token: val }),
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok || !result.success) throw new Error(result.error || "登录失败");
     await adminFetch("/api/admin/overview");
-    localStorage.setItem("admin_token", adminToken);
     overlay.classList.add("hidden");
     content.classList.remove("hidden");
     showToast("登录成功");
     loadAll();
   } catch (e) {
-    adminToken = localStorage.getItem("admin_token") || "";
-    showToast("口令错误");
+    showToast(e.message.includes("频繁") ? e.message : "口令错误");
   }
 }
 document.getElementById("loginBtn").onclick = login;
 document.getElementById("adminTokenInput").onkeydown = (e) => { if (e.key === "Enter") login(); };
 
-function logout() {
+async function logout() {
+  await fetch("/api/admin/logout", { method: "POST", headers: { "X-CSRF-Token": readCookie("csrf_token") }, credentials: "same-origin" }).catch(() => {});
   adminToken = "";
-  localStorage.removeItem("admin_token");
   content.classList.add("hidden");
   overlay.classList.remove("hidden");
   document.getElementById("adminTokenInput").value = "";
   showToast("已退出");
+}
+
+async function exportCsv() {
+  const range = document.getElementById("rangeSelect").value;
+  const res = await fetch(`/api/admin/export.csv?range=${encodeURIComponent(range)}`, { headers: { "X-CSRF-Token": readCookie("csrf_token") }, credentials: "same-origin" });
+  if (!res.ok) { showToast("导出失败"); return; }
+  const blob = await res.blob();
+  const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "link-extractor-report.csv"; link.click(); URL.revokeObjectURL(link.href);
 }
 
 function fmt(n) { return (n ?? 0).toLocaleString("zh-CN"); }
@@ -229,18 +328,37 @@ function renderTrend(trend) {
     return [x, y];
   });
   const line = pts.map(p => p.join(",")).join(" ");
+  const okPts = trend.map((t, i) => {
+    const x = pad + i * step;
+    const y = h - pad - ((t.ok || 0) / max) * (h - pad * 2);
+    return [x, y];
+  });
   const dots = pts.map((p, i) =>
-    `<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="#1769e0"><title>${trend[i].date} 共${trend[i].count}条 成功${trend[i].ok}</title></circle>`
+    `<circle data-trend-index="${i}" cx="${p[0]}" cy="${p[1]}" r="4" fill="#1769e0" style="cursor:crosshair"><title>${trend[i].date} 共${trend[i].count}条 成功${trend[i].ok}</title></circle>`
   ).join("");
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;">
       <line x1="${pad}" y1="${h - pad}" x2="${w - pad}" y2="${h - pad}" stroke="#dbe3ee" stroke-width="1"/>
       <polyline points="${line}" fill="none" stroke="#1769e0" stroke-width="2"/>
+      <polyline points="${okPts.map(p => p.join(",")).join(" ")}" fill="none" stroke="#18a866" stroke-width="2" stroke-dasharray="4 3"/>
       ${dots}
     </svg>
     <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);">
       ${trend.map(t => `<span>${esc(t.date)}</span>`).join("")}
-    </div>`;
+    </div><div style="font-size:11px;color:var(--text2);margin-top:3px;">蓝线 总提取 · 绿虚线 成功</div>`;
+  const tip = document.getElementById("chartTip");
+  el.querySelectorAll("circle[data-trend-index]").forEach(dot => {
+    dot.addEventListener("mouseenter", () => {
+      const item = trend[Number(dot.dataset.trendIndex)];
+      tip.innerHTML = `<strong>${esc(item.date)}</strong><br>提取 ${fmt(item.count)} 条 · 成功 ${fmt(item.ok)}<br>失败 ${fmt(item.fail ?? item.count - item.ok)} 条`;
+      const wrap = tip.parentElement.getBoundingClientRect();
+      const rect = dot.getBoundingClientRect();
+      tip.style.left = `${Math.max(4, rect.left - wrap.left - 28)}px`;
+      tip.style.top = `${Math.max(2, rect.top - wrap.top - 62)}px`;
+      tip.style.display = "block";
+    });
+    dot.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  });
 }
 
 function renderPlatform(dist) {
@@ -258,12 +376,58 @@ function renderPlatform(dist) {
   }).join("");
 }
 
+function renderPlatformHealth(health) {
+  const el = document.getElementById("platformHealth");
+  const entries = Object.entries(health || {});
+  if (!entries.length) { el.innerHTML = '<div class="empty">暂无平台数据</div>'; return; }
+  el.innerHTML = entries.map(([name, v]) => {
+    const rate = v.service_success_rate ?? v.success_rate;
+    const cls = rate >= 95 ? "ok" : rate >= 85 ? "" : "fail";
+    return `<div class="health-row"><span>${esc(name)} <span style="color:var(--text2);font-size:12px;">${fmt(v.total)} 次 · 用户错误 ${fmt(v.user_errors)} · 服务失败 ${fmt(v.service_failures)}</span></span><span class="health-rate ${cls}">${rate}%</span></div>`;
+  }).join("");
+}
+
+function renderServiceStatus(health, ov, perf) {
+  const strip = document.getElementById("statusStrip");
+  const text = document.getElementById("statusText");
+  const rate = Number(ov.service_success_rate ?? ov.success_rate ?? 0);
+  const p95 = Number(perf.p95_duration_ms || 0);
+  const uptimeLabel = health && Number.isFinite(Number(health.uptime_seconds)) ? formatUptime(health.uptime_seconds) : "未连接";
+  document.getElementById("headerUptime").textContent = `运行 ${uptimeLabel}`;
+  let state = "ok";
+  strip.className = "status-strip";
+  if (!health || health.status !== "ok") {
+    state = "bad"; strip.classList.add("bad"); text.textContent = "服务异常：健康检查未通过";
+  } else if (rate < 90 || p95 > 5000) {
+    state = "warn"; strip.classList.add("warn"); text.textContent = `需要关注：服务稳定性 ${rate}% · P95 ${fmt(p95)}ms`;
+  } else {
+    const uptime = health && Number.isFinite(Number(health.uptime_seconds)) ? ` · 运行 ${formatUptime(health.uptime_seconds)}` : "";
+    text.textContent = `服务正常：稳定性 ${rate}% · P95 ${fmt(p95)}ms${uptime}`;
+  }
+  document.title = state === "ok" ? "运营看板 · 链接提取工具" : "⚠️ 运营看板 · 需要关注";
+  if (window._lastDashboardState && window._lastDashboardState !== state && state !== "ok") {
+    showToast(state === "bad" ? "服务异常，请立即检查" : "服务指标需要关注");
+  }
+  window._lastDashboardState = state;
+}
+
+function formatUptime(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return d ? `${d}天${h}小时` : h ? `${h}小时${m}分` : `${m}分`;
+}
+
 function renderDevices(devices) {
   const body = document.getElementById("deviceBody");
   const empty = document.getElementById("deviceEmpty");
   if (!devices || !devices.length) { body.innerHTML = ""; empty.classList.remove("hidden"); return; }
   empty.classList.add("hidden");
-  body.innerHTML = devices.map(d => `
+  const query = (document.getElementById("deviceSearch").value || "").trim().toLowerCase();
+  const sort = document.getElementById("deviceSort").value;
+  const filtered = devices.filter(d => !query || String(d.device_id || "").toLowerCase().includes(query));
+  filtered.sort((a, b) => sort === "fail" ? b.fail - a.fail : sort === "rate" ? b.success_rate - a.success_rate : sort === "recent" ? String(b.last_at).localeCompare(String(a.last_at)) : b.total - a.total);
+  const visible = expanded.devices ? filtered : filtered.slice(0, 15);
+  body.innerHTML = visible.map(d => `
     <tr>
       <td style="font-family:monospace;font-size:12px;">${esc(d.device_id)}</td>
       <td class="num">${fmt(d.total)}</td>
@@ -272,20 +436,49 @@ function renderDevices(devices) {
       <td class="num ${d.success_rate >= 90 ? "ok" : d.success_rate < 70 ? "fail" : ""}">${d.success_rate}%</td>
       <td style="color:var(--text2);font-size:12px;">${esc(d.last_at || "-")}</td>
     </tr>`).join("");
+  const more = document.getElementById("deviceMore");
+  more.classList.toggle("hidden", filtered.length <= 15);
+  more.textContent = expanded.devices ? "收起设备列表" : `展开全部设备（${filtered.length}）`;
 }
 
 function renderErrors(errors) {
   const el = document.getElementById("errorList");
   if (!errors || !errors.length) { el.innerHTML = '<div class="empty">暂无失败记录</div>'; return; }
-  el.innerHTML = errors.slice(0, 10).map(e => `
-    <div class="err-item"><span class="txt" title="${esc(e.error)}">${esc(e.error)}</span><span>${e.count}</span></div>`).join("");
+  const visible = expanded.errors ? errors : errors.slice(0, 10);
+  el.classList.toggle("list-expanded", expanded.errors);
+  el.innerHTML = visible.map(e => {
+    const action = errorAction(e.error);
+    return `<div class="err-item"><span class="txt" title="${esc(e.error)}">${esc(e.error)}${action ? `<span class="action-tag">${esc(action)}</span>` : ""}</span><span>${e.count}</span></div>`;
+  }).join("");
+  const more = document.getElementById("errorMore");
+  more.classList.toggle("hidden", errors.length <= 10);
+  more.textContent = expanded.errors ? "收起错误列表" : `展开全部错误（${errors.length}）`;
+}
+
+function errorAction(error) {
+  const text = String(error || "");
+  if (text.includes("xsec_token")) return "让用户重新复制小红书链接";
+  if (text.includes("风控") || text.includes("HTML") || text.includes("JSON")) return "稍后重试 / 检查平台风控";
+  if (text.includes("不支持")) return "确认是否为抖音或小红书链接";
+  if (text.includes("作品 ID")) return "确认链接未失效且不是直播/商品链接";
+  return "查看服务日志";
 }
 
 function renderRecent(items) {
   const el = document.getElementById("recentList");
   if (!items || !items.length) { el.innerHTML = '<div class="empty">暂无动态</div>'; return; }
   const nameMap = { douyin: "抖音", xiaohongshu: "小红书" };
-  el.innerHTML = items.map(it => {
+  const platform = document.getElementById("recentPlatform").value;
+  const status = document.getElementById("recentStatus").value;
+  const filtered = items.filter(it => (platform === "all" || it.platform === platform) && (status === "all" || it.status === status));
+  const visible = expanded.recent ? filtered : filtered.slice(0, 15);
+  el.classList.toggle("list-expanded", expanded.recent);
+  if (!filtered.length) {
+    el.innerHTML = '<div class="empty">当前筛选暂无动态</div>';
+    document.getElementById("recentMore").classList.add("hidden");
+    return;
+  }
+  el.innerHTML = visible.map(it => {
     const status = it.status === "success"
       ? '<span class="ok">成功</span>'
       : `<span class="fail">失败</span>`;
@@ -295,42 +488,76 @@ function renderRecent(items) {
       <span class="dyn-time">${esc((it.created_at || "").slice(5))}</span>
     </div>`;
   }).join("");
+  const more = document.getElementById("recentMore");
+  more.classList.toggle("hidden", filtered.length <= 15);
+  more.textContent = expanded.recent ? "收起动态列表" : `展开全部动态（${filtered.length}）`;
 }
+
+document.getElementById("deviceMore").onclick = () => { expanded.devices = !expanded.devices; loadAll(); };
+document.getElementById("errorMore").onclick = () => { expanded.errors = !expanded.errors; loadAll(); };
+document.getElementById("recentMore").onclick = () => { expanded.recent = !expanded.recent; loadAll(); };
+let filterTimer = 0;
+function refreshSoon() { clearTimeout(filterTimer); filterTimer = setTimeout(loadAll, 180); }
+document.getElementById("deviceSearch").oninput = refreshSoon;
+document.getElementById("deviceSort").onchange = () => loadAll();
+document.getElementById("recentPlatform").onchange = () => loadAll();
+document.getElementById("recentStatus").onchange = () => loadAll();
 
 async function loadAll() {
   try {
-    const [ov, dev, errs, recent] = await Promise.all([
-      adminFetch("/api/admin/overview"),
-      adminFetch("/api/admin/devices"),
-      adminFetch("/api/admin/errors"),
-      adminFetch("/api/admin/recent"),
+    const range = document.getElementById("rangeSelect").value;
+    document.getElementById("trendTitle").textContent = range === "24h" ? "最近 24 小时提取" : range === "30d" ? "近 30 天提取趋势" : "近 7 天提取趋势";
+    const q = `?range=${encodeURIComponent(range)}`;
+    const [ov, dev, errs, recent, perf, healthRes] = await Promise.all([
+      adminFetch("/api/admin/overview" + q),
+      adminFetch("/api/admin/devices" + q + "&limit=100"),
+      adminFetch("/api/admin/errors" + q),
+      adminFetch("/api/admin/recent" + q),
+      adminFetch("/api/admin/performance" + q),
+      fetch("/api/health").then(r => r.json()).catch(() => null),
     ]);
     document.getElementById("mTotal").textContent = fmt(ov.total);
     document.getElementById("mRate").textContent = ov.success_rate + "%";
+    document.getElementById("mFail").textContent = `失败 ${fmt(ov.fail)} · 服务稳定性 ${ov.service_success_rate ?? ov.success_rate}%`;
     document.getElementById("mDevices").textContent = fmt(ov.active_devices);
+    document.getElementById("mDevicesSub").textContent = `7天 ${fmt(ov.active_devices_7d)} · 30天 ${fmt(ov.active_devices_30d)}`;
     document.getElementById("mToday").textContent = fmt(ov.today_count);
+    document.getElementById("pAvg").textContent = fmt(perf.avg_duration_ms);
+    document.getElementById("p95").textContent = fmt(perf.p95_duration_ms);
+    document.getElementById("pHit").textContent = perf.cache_hit_rate + "%";
+    document.getElementById("pBatch").textContent = perf.batch_concurrency + " / " + perf.queue_concurrency;
+    document.getElementById("pQueue").textContent = "队列并发 " + perf.queue_concurrency;
+    const retry = perf.douyin_retry_success_attempts || {};
+    const retryParts = ["1", "2", "3"].map(n => {
+      const v = retry[n];
+      return `${n}次成功 ${v ? fmt(v.count) + "（" + v.rate + "%）" : "0（0%）"}`;
+    });
+    document.getElementById("retryInsight").textContent = "抖音成功尝试分布：" + retryParts.join(" · ");
+    document.getElementById("updatedAt").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", {hour:"2-digit", minute:"2-digit", second:"2-digit"});
     renderTrend(ov.trend);
     renderPlatform(ov.platform_dist);
+    renderPlatformHealth(ov.platform_health);
+    renderServiceStatus(healthRes, ov, perf);
     renderDevices(dev.devices);
     renderErrors(errs.errors);
     renderRecent(recent.items);
   } catch (e) {
     if (e.message === "unauthorized") { logout(); showToast("请重新登录"); }
-    else showToast("加载失败");
+    else showToast("加载失败，请点击刷新重试");
   }
 }
 
+document.getElementById("rangeSelect").onchange = loadAll;
+
 (async function init() {
-  if (adminToken) {
-    try {
-      await adminFetch("/api/admin/overview");
-      overlay.classList.add("hidden");
-      content.classList.remove("hidden");
-      loadAll();
-      return;
-    } catch (e) { /* 令牌失效，走登录 */ }
+  try {
+    await adminFetch("/api/admin/overview");
+    overlay.classList.add("hidden");
+    content.classList.remove("hidden");
+    loadAll();
+  } catch (e) {
+    overlay.classList.remove("hidden");
   }
-  overlay.classList.remove("hidden");
 })();
 
 setInterval(() => { if (!content.classList.contains("hidden")) loadAll(); }, 30000);
