@@ -119,6 +119,45 @@ app.config["JSON_AS_ASCII"] = False
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024  # 请求体 512KB
 SERVICE_STARTED_AT = time.time()
 
+# ---------------------------------------------------------------- 失败负缓存
+
+# 同一 URL 提取失败后短期直接返回缓存结果，不再真实请求平台：
+# - 确定性错误（链接无效/凭证失效/缺 token/不支持的链接）缓存 10 分钟（重试无意义，需换新链接）
+# - 瞬时错误（触发验证/超时等）缓存 60 秒（可能稍后恢复，自动重试有机会成功）
+# - 前端手动「重试」传 force=true 绕过缓存，真实重新请求
+_FAIL_CACHE_TTL_DEFINITE = 600
+_FAIL_CACHE_TTL_TRANSIENT = 60
+_FAIL_CACHE_MAX = 500
+_TRANSIENT_KEYWORDS = ("触发验证", "请稍后重试", "未返回完整文案", "超时")
+_fail_cache: dict[str, tuple[float, str, str]] = {}  # url -> (expire_ts, error, hint)
+
+
+def _fail_cache_get(url: str):
+    """命中且未过期返回 (error, hint)，否则返回 None（顺带清理过期项）。"""
+    entry = _fail_cache.get(url)
+    if not entry:
+        return None
+    expire_ts, error, hint = entry
+    if time.time() < expire_ts:
+        return error, hint
+    _fail_cache.pop(url, None)
+    return None
+
+
+def _fail_cache_put(url: str, error: str, hint: str) -> None:
+    ttl = _FAIL_CACHE_TTL_TRANSIENT if any(k in error for k in _TRANSIENT_KEYWORDS) else _FAIL_CACHE_TTL_DEFINITE
+    _fail_cache[url] = (time.time() + ttl, error, hint)
+    # 防内存膨胀：先清过期，仍超限则淘汰最旧一半
+    if len(_fail_cache) > _FAIL_CACHE_MAX:
+        now = time.time()
+        for k, (expire_ts, _, _) in list(_fail_cache.items()):
+            if expire_ts <= now:
+                _fail_cache.pop(k, None)
+        if len(_fail_cache) > _FAIL_CACHE_MAX:
+            for k in sorted(_fail_cache, key=lambda u: _fail_cache[u][0])[: len(_fail_cache) // 2]:
+                _fail_cache.pop(k, None)
+
+
 # ---------------------------------------------------------------- 请求日志
 
 @app.before_request
@@ -441,6 +480,7 @@ def api_extract():
 
     data = request.get_json(silent=True) or {}
     raw = data.get("urls", "")
+    force = bool(data.get("force", False))  # 手动重试时强制绕过失败负缓存
     # 压测/诊断可显式关闭历史落库，避免把公开样本混入用户转换记录。
     # 未传该字段时仍按原行为保存，保持现有前端和统计逻辑不变。
     record_history = data.get("record_history") is not False
@@ -506,6 +546,26 @@ def api_extract():
         """提取单条链接（带随机抖动，避免节奏规律触发风控）。"""
         started_at = time.monotonic()
         time.sleep(random.uniform(0, 0.5))
+
+        # 失败负缓存：同一 URL 短期内失败过 → 直接返回缓存结果，不再真实请求平台
+        # （防无效链接反复重试：既省平台请求、又降低风控触发概率）
+        if not force:
+            cached = _fail_cache_get(url)
+            if cached:
+                cached_error, cached_hint = cached
+                log.info("失败缓存命中，跳过平台请求: %s (%s)", url[:60], cached_error)
+                return {
+                    "original_url": url,
+                    "success": False,
+                    "platform": "", "platform_raw": "",
+                    "title": "", "caption": "", "author_name": "",
+                    "publish_time": "", "like_count": 0,
+                    "video_url": "", "canonical_url": "", "cover_url": "",
+                    "post_id": "", "error": cached_error, "hint": cached_hint,
+                    "partial": False, "cache_hit": False, "telemetry": None,
+                    "cached_fail": True,
+                }
+
         result = extract_link(url)
         item = {
             "original_url": url,
@@ -540,6 +600,8 @@ def api_extract():
                      result.author_name or "-", result.like_count, elapsed_ms)
         else:
             log.warning("提取失败 [%s] 错误:%s (耗时:%.0fms)", url[:60], result.error, elapsed_ms)
+            # 写入失败负缓存（同 URL 短期重试直接命中，不再打平台）
+            _fail_cache_put(url, result.error, result.hint)
         if record_history:
             _save_to_db(item)
         return item

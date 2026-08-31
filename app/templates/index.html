@@ -396,7 +396,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.0</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.1</div>
   </footer>
 </div>
 
@@ -647,7 +647,7 @@ function onInputChange() {
   }, 1000);
 }
 
-async function doExtract(isAuto = false) {
+async function doExtract(isAuto = false, force = false) {
   const raw = document.getElementById("inputUrls").value;
   const urls = extractUrls(raw);
   if (!urls.length) {
@@ -680,7 +680,7 @@ async function doExtract(isAuto = false) {
     let res = await fetch("/api/extract", {
       method: "POST",
       headers: buildHeaders(),
-      body: JSON.stringify({ urls }),
+      body: JSON.stringify({ urls, force }),
     });
     // 请求失败：直接抛出错误信息
     if (!res.ok) {
@@ -853,7 +853,7 @@ function resultCardHtml(r, i) {
         <div class="field-label">错误信息</div>
         <div class="field-value" style="color:var(--error);">${esc(r.error)}</div>
       </div>
-      ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}</div></div>` : ""}
+      ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}${r.cached_fail ? '<br/><span style="color:var(--warning, #b8860b);">该链接近期已尝试失败，已跳过重复请求。请从 App 重新复制最新分享链接。</span>' : ''}</div></div>` : ""}
       <div class="copy-row" style="margin-top:12px;">
         <button class="btn btn-ghost" onclick="copyText(this.closest('.result-item').dataset.originalUrl, this)">📋 复制原链接</button>
         <button class="btn btn-ghost" onclick="retryLink(this, ${i})">🔄 重试这条</button>
@@ -900,11 +900,11 @@ function unescapeHtml(s) {
 }
 
 /** 流式提取单条链接，返回结果对象（供重试用） */
-async function extractOneStream(url) {
+async function extractOneStream(url, force) {
   let res = await fetch("/api/extract", {
     method: "POST",
     headers: buildHeaders(),
-    body: JSON.stringify({ urls: [url] }),
+    body: JSON.stringify({ urls: [url], force: !!force }),
   });
   // 请求失败：直接抛出错误信息
   if (!res.ok) {
@@ -950,7 +950,7 @@ async function retryLink(btn, index) {
   btn.disabled = true;
   btn.innerHTML = '<span class="loading-spinner"></span>重试中...';
   try {
-    const r = await extractOneStream(target);
+    const r = await extractOneStream(target, true);  // force=true：绕过失败缓存真实重试
     if (r && r.success) {
       showToast("重试成功！");
       // 用新结果替换整个卡片
@@ -996,7 +996,7 @@ async function retryFailedLinks() {
   document.getElementById("inputUrls").value = failed.map(r => r.original_url).join("\n");
   updateLinkCount();
   showToast(`正在重试 ${failed.length} 条失败链接`);
-  await doExtract();
+  await doExtract(false, true);  // force=true：绕过失败缓存真实重试
 }
 
 /** 重新编号所有结果卡片索引 */

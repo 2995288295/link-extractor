@@ -720,7 +720,7 @@ def _extract_xhs_initial_state(
 
     if urlparse(final_url).path.rstrip("/") == "/login":
         raise XhsAccessDeniedError(
-            "小红书要求登录或分享凭证已失效，请从 App 重新复制最新链接"
+            "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
         )
 
     html = response.text
@@ -799,7 +799,7 @@ def _extract_xhs_lightweight(
 
     if urlparse(final_url).path.rstrip("/") == "/login":
         raise XhsAccessDeniedError(
-            "小红书要求登录或分享凭证已失效，请从 App 重新复制最新链接"
+            "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
         )
     if "404" in final_url or "error_code" in final_url or "error_msg" in final_url:
         raise RuntimeError(
