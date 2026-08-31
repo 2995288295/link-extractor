@@ -1037,7 +1037,7 @@ def api_admin_overview():
     suspect_count = conn.execute(
         """
         SELECT COUNT(*) c FROM history WHERE created_at >= ?
-          AND status NOT IN ('success', 'blocked')
+          AND outcome_class IN ('upstream_error', 'internal_error')
           AND (lower(error) LIKE '%风控%' OR lower(error) LIKE '%限制访问%'
                OR lower(error) LIKE '%验证%' OR lower(error) LIKE '%captcha%'
                OR lower(error) LIKE '%challenge%' OR lower(error) LIKE '%暂时%')
