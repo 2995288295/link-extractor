@@ -997,16 +997,22 @@ def api_admin_overview():
     blocked_total = blocked_cache_count + blocked_cooldown_count
 
     platform_rows = conn.execute(
-        "SELECT platform, COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' GROUP BY platform", (since,)
+        "SELECT CASE "
+        "WHEN platform IN ('抖音', 'douyin') THEN 'douyin' "
+        "WHEN platform IN ('小红书', 'xiaohongshu') THEN 'xiaohongshu' "
+        "ELSE platform END AS norm_platform, COUNT(*) c FROM history "
+        "WHERE created_at >= ? AND outcome_class = 'success' GROUP BY norm_platform", (since,)
     ).fetchall()
     platform_dist = {}
     for row in platform_rows:
-        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
+        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["norm_platform"], row["norm_platform"] or "未知")
         platform_dist[name] = platform_dist.get(name, 0) + row["c"]
 
     platform_health = {}
     health_rows = conn.execute(
         "SELECT CASE "
+        "WHEN platform IN ('抖音', 'douyin') THEN 'douyin' "
+        "WHEN platform IN ('小红书', 'xiaohongshu') THEN 'xiaohongshu' "
         "WHEN platform != '' THEN platform "
         "WHEN lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%' THEN 'douyin' "
         "WHEN lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%' THEN 'xiaohongshu' "
@@ -1047,14 +1053,14 @@ def api_admin_overview():
     for name, h in platform_health.items():
         if h["total"] < 5:  # 样本过少不判定
             continue
-        total = h["total"]
+        plat_total = h["total"]
         # 仅以服务失败占比判定（排除用户输入错误如乱粘链接/无效作品，避免把
         # 「未知平台全是 invalid_input」误报为风控）；上游/内部错误才是风控信号。
-        svc_fail_rate = h["service_failures"] / total * 100 if total else 0
+        svc_fail_rate = h["service_failures"] / plat_total * 100 if plat_total else 0
         entry = {
-            "fail_rate": round(h["fail"] / total * 100, 1) if total else 0,
+            "fail_rate": round(h["fail"] / plat_total * 100, 1) if plat_total else 0,
             "service_failures": h["service_failures"],
-            "total": total,
+            "total": plat_total,
         }
         if svc_fail_rate >= 30:
             risk["level"] = "risk"
@@ -1083,10 +1089,10 @@ def api_admin_overview():
         SELECT substr(created_at, 1, 10) day,
                COUNT(*) cnt,
                SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok,
-               SUM(CASE WHEN platform = 'douyin'
+               SUM(CASE WHEN platform IN ('douyin', '抖音')
                      OR (platform = '' AND (lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%'))
                    THEN 1 ELSE 0 END) dy,
-               SUM(CASE WHEN platform = 'xiaohongshu'
+               SUM(CASE WHEN platform IN ('xiaohongshu', '小红书')
                      OR (platform = '' AND (lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%'))
                    THEN 1 ELSE 0 END) xhs
         FROM history WHERE created_at >= ? AND status != 'blocked'
