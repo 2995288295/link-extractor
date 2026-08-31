@@ -168,6 +168,7 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
       <div class="metric"><div class="label">转换成功率</div><div class="value" id="mRate">-</div><div class="sub" id="mFail">失败 - · 服务稳定性 -</div></div>
       <div class="metric"><div class="label">窗口活跃设备</div><div class="value" id="mDevices">-</div><div class="sub" id="mDevicesSub">7天 - · 30天 -</div></div>
       <div class="metric"><div class="label">今日提取</div><div class="value" id="mToday">-</div></div>
+      <div class="metric"><div class="label">防护拦截</div><div class="value" id="mBlocked">-</div><div class="sub" id="mBlockedSub">失败缓存 - · 冷却 -</div></div>
     </div>
 
     <div class="card performance-card">
@@ -512,7 +513,9 @@ function renderRecent(items) {
   el.innerHTML = visible.map(it => {
     const status = it.status === "success"
       ? '<span class="ok">成功</span>'
-      : `<span class="fail">失败</span>`;
+      : it.status === "blocked"
+        ? '<span style="color:#b8860b;font-weight:600;">拦截</span>'
+        : `<span class="fail">失败</span>`;
     const extra = it.status !== "success" && it.error ? ` · ${esc(it.error.slice(0, 30))}` : "";
     return `<div class="dyn-item">
       <span>${esc(nameMap[it.platform] || it.platform || "未知")} ${status}${extra}</span>
@@ -551,6 +554,8 @@ async function loadAll() {
     document.getElementById("mTotal").textContent = fmt(ov.total);
     document.getElementById("mRate").textContent = ov.success_rate + "%";
     document.getElementById("mFail").textContent = `失败 ${fmt(ov.fail)} · 服务稳定性 ${ov.service_success_rate ?? ov.success_rate}%`;
+    document.getElementById("mBlocked").textContent = fmt(ov.blocked_total ?? 0);
+    document.getElementById("mBlockedSub").textContent = `失败缓存 ${fmt(ov.blocked_cache ?? 0)} · 冷却 ${fmt(ov.blocked_cooldown ?? 0)}`;
     document.getElementById("mDevices").textContent = fmt(ov.active_devices);
     document.getElementById("mDevicesSub").textContent = `7天 ${fmt(ov.active_devices_7d)} · 30天 ${fmt(ov.active_devices_30d)}`;
     document.getElementById("mToday").textContent = fmt(ov.today_count);

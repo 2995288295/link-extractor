@@ -261,6 +261,31 @@ def _is_safe_url(url: str) -> bool:
         return False
 
 
+def _validate_url_integrity(url: str) -> str:
+    """预检分享链接是否被聊天工具截断（作品 ID 明显短于正常长度）。
+
+    返回错误文案（正常返回空字符串）。仅校验完整链接路径中的作品 ID：
+    - 小红书：/explore/{id} 或 /discovery/item/{id}，标准 24 位十六进制 ID
+    - 抖音：/video/{id} 或 /note/{id} 等，标准 19 位数字 ID
+    - 短链（v.douyin.com/xhslink）路径不含作品 ID，跳过不校验
+    校验不通过时直接拦截返回，避免把残缺链接送到平台请求层反复打接口。
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        path = urlparse(url).path
+    except Exception:
+        return ""
+    if "xiaohongshu" in host:
+        m = re.search(r"/(?:explore|discovery/item)/([0-9A-Za-z]+)", path)
+        if m and len(m.group(1)) < 20:
+            return f"小红书链接不完整（作品 ID 仅 {len(m.group(1))} 位，标准 24 位），可能被聊天工具截断，请从 App 重新复制完整链接"
+    elif "douyin" in host:
+        m = re.search(r"/(?:video|note|share/(?:video|slides|note))/(\d+)", path, re.I)
+        if m and len(m.group(1)) < 15:
+            return f"抖音链接不完整（作品 ID 仅 {len(m.group(1))} 位，标准 19 位），可能被聊天工具截断，请从 App 重新复制完整链接"
+    return ""
+
+
 def _safe_get_with_redirects(url: str, *, headers=None, timeout=10, max_redirects=5):
     """逐跳校验重定向目标后再请求，避免先访问内网再做检查。"""
     current = url
@@ -1075,6 +1100,17 @@ def extract_link(raw: str) -> ExtractResult:
             success=False,
             error="不支持的链接，仅支持抖音和小红书链接",
             hint="请粘贴抖音或小红书的分享链接（App 内复制链接）",
+            telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
+        )
+
+    # 2.5 残缺链接预检：作品 ID 明显短于标准长度时（聊天工具截断），直接拦截，
+    # 不产生平台请求，也避免同链接反复重试（失败负缓存会兜底 10 分钟）
+    integrity_error = _validate_url_integrity(url)
+    if integrity_error:
+        return ExtractResult(
+            success=False,
+            error=integrity_error,
+            hint="请从 App 内复制完整分享链接（注意复制完整，避免被聊天工具截断）",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
 

@@ -332,7 +332,7 @@ def _init_db():
                  "WHEN error LIKE '%不支持%' OR error LIKE '%xsec_token%' OR error LIKE '%作品 ID%' THEN 'invalid_input' "
                  "WHEN error LIKE '%失效%' OR error LIKE '%不存在%' THEN 'expired_content' "
                  "WHEN error LIKE '%风控%' OR error LIKE '%HTML%' OR error LIKE '%JSON%' OR error LIKE '%请求%' THEN 'upstream_error' "
-                 "ELSE 'internal_error' END WHERE status != 'success' AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
+                 "ELSE 'internal_error' END WHERE status NOT IN ('success', 'blocked') AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
     conn.execute("CREATE TABLE IF NOT EXISTS extract_cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_extract_cache_expiry ON extract_cache(expires_at)")
     conn.execute("CREATE TABLE IF NOT EXISTS admin_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, message TEXT NOT NULL, value REAL DEFAULT 0, created_at TEXT NOT NULL)")
@@ -857,11 +857,13 @@ def api_notice():
     conn = _get_db()
     try:
         since = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        # 排除 blocked 记录（失败缓存命中/冷却拦截是主动防护，不是平台真实失败，
+        # 若计入失败率会误报风控风险）
         row = conn.execute(
             """
             SELECT COUNT(*) total,
                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok
-            FROM history WHERE created_at >= ?
+            FROM history WHERE created_at >= ? AND status != 'blocked'
             """,
             (since,),
         ).fetchone()
@@ -972,7 +974,9 @@ def api_admin_overview():
 
     window, days, since = _admin_window()
     conn = _get_db()
-    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
+    # 拦截记录（失败缓存命中/冷却拦截）用 status='blocked' 落库，属主动防护而非平台真实结果，
+    # 所有成功率/失败率/活跃设备统计统一排除，避免虚低成功率或误报风控；拦截量单独统计展示。
+    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)).fetchone()["c"]
     ok_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status = 'success'", (since,)).fetchone()["c"]
     fail_count = total - ok_count
     user_error_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input', 'expired_content')", (since,)).fetchone()["c"]
@@ -980,12 +984,17 @@ def api_admin_overview():
     valid_total = total - user_error_count
     service_success_rate = round(ok_count / valid_total * 100, 1) if valid_total else 0
     input_validity_rate = round(valid_total / total * 100, 1) if total else 0
-    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
+    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)).fetchone()["c"]
 
     today_str = datetime.now().strftime("%Y-%m-%d")
-    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (today_str + "%",)).fetchone()["c"]
-    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
-    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
+    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND status != 'blocked'", (today_str + "%",)).fetchone()["c"]
+    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
+    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
+
+    # ---- 防护拦截统计：失败缓存命中 / 冷却拦截（主动防护体系的工作量证明）----
+    blocked_cache_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'blocked_cache'", (since,)).fetchone()["c"] or 0
+    blocked_cooldown_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'blocked_cooldown'", (since,)).fetchone()["c"] or 0
+    blocked_total = blocked_cache_count + blocked_cooldown_count
 
     platform_rows = conn.execute(
         "SELECT platform, COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' GROUP BY platform", (since,)
@@ -1005,7 +1014,7 @@ def api_admin_overview():
         "SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok, "
         "SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content') THEN 1 ELSE 0 END) user_errors, "
         "SUM(CASE WHEN outcome_class IN ('upstream_error','internal_error') THEN 1 ELSE 0 END) service_failures "
-        "FROM history WHERE created_at >= ? GROUP BY resolved_platform", (since,)
+        "FROM history WHERE created_at >= ? AND status != 'blocked' GROUP BY resolved_platform", (since,)
     ).fetchall()
     for row in health_rows:
         name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["resolved_platform"], row["resolved_platform"] or "未知")
@@ -1028,7 +1037,7 @@ def api_admin_overview():
     suspect_count = conn.execute(
         """
         SELECT COUNT(*) c FROM history WHERE created_at >= ?
-          AND status != 'success'
+          AND status NOT IN ('success', 'blocked')
           AND (lower(error) LIKE '%风控%' OR lower(error) LIKE '%限制访问%'
                OR lower(error) LIKE '%验证%' OR lower(error) LIKE '%captcha%'
                OR lower(error) LIKE '%challenge%' OR lower(error) LIKE '%暂时%')
@@ -1038,13 +1047,19 @@ def api_admin_overview():
     for name, h in platform_health.items():
         if h["total"] < 5:  # 样本过少不判定
             continue
-        fail_rate = h["fail"] / h["total"] * 100 if h["total"] else 0
-        service_fail_rate = h["service_failures"] / h["total"] * 100 if h["total"] else 0
-        entry = {"fail_rate": round(fail_rate, 1), "service_failures": h["service_failures"], "total": h["total"]}
-        if fail_rate >= 50 or service_fail_rate >= 30:
+        total = h["total"]
+        # 仅以服务失败占比判定（排除用户输入错误如乱粘链接/无效作品，避免把
+        # 「未知平台全是 invalid_input」误报为风控）；上游/内部错误才是风控信号。
+        svc_fail_rate = h["service_failures"] / total * 100 if total else 0
+        entry = {
+            "fail_rate": round(h["fail"] / total * 100, 1) if total else 0,
+            "service_failures": h["service_failures"],
+            "total": total,
+        }
+        if svc_fail_rate >= 30:
             risk["level"] = "risk"
             risk["platforms"][name] = entry
-        elif fail_rate >= 25 or service_fail_rate >= 15:
+        elif svc_fail_rate >= 15:
             if risk["level"] == "ok":
                 risk["level"] = "warn"
             risk["platforms"][name] = entry
@@ -1074,7 +1089,7 @@ def api_admin_overview():
                SUM(CASE WHEN platform = 'xiaohongshu'
                      OR (platform = '' AND (lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%'))
                    THEN 1 ELSE 0 END) xhs
-        FROM history WHERE created_at >= ?
+        FROM history WHERE created_at >= ? AND status != 'blocked'
         GROUP BY day
         """, (since,)
     ).fetchall()
@@ -1105,6 +1120,9 @@ def api_admin_overview():
         "input_validity_rate": input_validity_rate,
         "user_error_count": user_error_count,
         "service_failure_count": service_failure_count,
+        "blocked_total": blocked_total,
+        "blocked_cache": blocked_cache_count,
+        "blocked_cooldown": blocked_cooldown_count,
         "active_devices": active_devices,
         "active_devices_7d": active_7d,
         "active_devices_30d": active_30d,
@@ -1131,7 +1149,7 @@ def api_admin_devices():
         limit, offset = 50, 0
     conn = _get_db()
     total_devices = conn.execute(
-        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)
+        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)
     ).fetchone()["c"]
     rows = conn.execute(
         """
@@ -1141,7 +1159,7 @@ def api_admin_devices():
                MIN(created_at) AS first_at,
                MAX(created_at) AS last_at
         FROM history
-        WHERE created_at >= ?
+        WHERE created_at >= ? AND status != 'blocked'
         GROUP BY device_id
         ORDER BY total DESC
         LIMIT ? OFFSET ?
@@ -1184,7 +1202,7 @@ def api_admin_errors():
     rows = conn.execute(
         """
         SELECT error, COUNT(*) c FROM history
-        WHERE created_at >= ? AND status != 'success' AND error != ''
+        WHERE created_at >= ? AND status NOT IN ('success', 'blocked') AND error != ''
         GROUP BY error ORDER BY c DESC LIMIT 30
         """, (since,)
     ).fetchall()
@@ -1247,16 +1265,16 @@ def api_admin_performance():
     window, _, since = _admin_window()
     conn = _get_db()
     row = conn.execute(
-        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ?", (since,)
+        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)
     ).fetchone()
     durations = [r["duration_ms"] for r in conn.execute(
-        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 ORDER BY duration_ms", (since,)
+        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 AND status != 'blocked' ORDER BY duration_ms", (since,)
     ).fetchall()]
     total = row["total"] or 0
     hits = row["cache_hits"] or 0
     p95 = durations[max(0, (len(durations) * 95 + 99) // 100 - 1)] if durations else 0
-    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success'", (since,)).fetchone()["c"]
-    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content')", (since,)).fetchone()["c"]
+    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' AND status != 'blocked'", (since,)).fetchone()["c"]
+    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content') AND status != 'blocked'", (since,)).fetchone()["c"]
     valid_total = total - user_errors
     service_failures = valid_total - current_ok
     retry_rows = conn.execute(

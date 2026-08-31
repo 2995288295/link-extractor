@@ -511,7 +511,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.4</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.5</div>
   </footer>
 </div>
 
@@ -696,6 +696,36 @@ function extractUrls(text) {
     .filter(u => u && !seen.has(u) && seen.add(u));
 }
 
+/** 检测残缺链接（作品 ID 明显短于标准长度，多为聊天工具截断）。正常返回空串。 */
+function findTruncatedLink(url) {
+  try {
+    const u = new URL(url);
+    const host = (u.hostname || "").toLowerCase();
+    const path = u.pathname || "";
+    if (host.includes("xiaohongshu.com")) {
+      const m = path.match(/\/(?:explore|discovery\/item)\/([0-9A-Za-z]+)/);
+      if (m && m[1].length < 20) {
+        return `小红书链接不完整（ID 仅 ${m[1].length} 位，标准 24 位），可能被截断，请从 App 重新复制`;
+      }
+    } else if (host.includes("douyin.com") || host.includes("iesdouyin.com")) {
+      const m = path.match(/\/(?:video|note|share\/(?:video|slides|note))\/(\d+)/);
+      if (m && m[1].length < 15) {
+        return `抖音链接不完整（ID 仅 ${m[1].length} 位，标准 19 位），可能被截断，请从 App 重新复制`;
+      }
+    }
+  } catch (e) { /* 非标准 URL 交给后端处理 */ }
+  return "";
+}
+
+/** 过滤掉残缺链接，返回 [正常链接数组, 残缺链接数] */
+function splitTruncatedLinks(urls) {
+  const good = [], bad = [];
+  for (const u of urls) {
+    if (findTruncatedLink(u)) bad.push(u); else good.push(u);
+  }
+  return [good, bad.length];
+}
+
 /** 实时统计输入框中的链接数 */
 function updateLinkCount() {
   const raw = document.getElementById("inputUrls").value;
@@ -764,7 +794,7 @@ function onInputChange() {
 
 async function doExtract(isAuto = false, force = false) {
   const raw = document.getElementById("inputUrls").value;
-  const urls = extractUrls(raw);
+  let urls = extractUrls(raw);
   if (!urls.length) {
     if (!isAuto) showToast("未识别到链接，请粘贴抖音或小红书分享链接");
     return;
@@ -772,6 +802,16 @@ async function doExtract(isAuto = false, force = false) {
   if (urls.length > 20) {
     if (!isAuto) showToast("一次最多 20 条链接，请分批提取");
     return;
+  }
+  // 残缺链接预检：作品 ID 明显短于标准长度（多为聊天工具截断），过滤并提示，不浪费平台请求
+  const [validUrls, truncatedCount] = splitTruncatedLinks(urls);
+  if (truncatedCount > 0) {
+    if (validUrls.length === 0) {
+      if (!isAuto) showToast("链接可能不完整（被聊天工具截断），请从 App 重新复制完整链接");
+      return;
+    }
+    urls = validUrls;
+    showToast(`已跳过 ${truncatedCount} 条不完整链接（作品 ID 过短，可能被截断）`);
   }
   if (extractingNow) return;
   extractingNow = true;
@@ -968,7 +1008,7 @@ function resultCardHtml(r, i) {
         <div class="field-label">错误信息</div>
         <div class="field-value" style="color:var(--error);">${esc(r.error)}</div>
       </div>
-      ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}${r.cached_fail ? '<br/><span style="color:var(--warning, #b8860b);">该链接近期已尝试失败，已跳过重复请求。请从 App 重新复制最新分享链接。</span>' : ''}</div></div>` : ""}
+      ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}${r.cached_fail ? '<br/><span style="color:var(--warning, #b8860b);">该链接近期已尝试失败，已跳过重复请求。请从 App 重新复制最新分享链接。</span>' : ''}${r.cooldown ? '<br/><span style="color:var(--warning, #b8860b);">为避免触发平台风控，请按上方倒计时稍后再试。</span>' : ''}</div></div>` : ""}
       <div class="copy-row" style="margin-top:12px;">
         <button class="btn btn-ghost" onclick="copyText(this.closest('.result-item').dataset.originalUrl, this)">📋 复制原链接</button>
         <button class="btn btn-ghost" onclick="retryLink(this, ${i})">🔄 重试这条</button>
@@ -1058,7 +1098,8 @@ async function extractOneStream(url, force) {
 /** 重试单条失败链接：重新提取并替换该卡片 */
 // ================= 重试节流（防风控） =================
 // 单条重试与批量重试共享全局冷却：避免用户连续点重试对平台打出瞬时请求洪峰
-const RETRY_COOLDOWN_SECONDS = 15;
+// 与后端 URL 冷却（_URL_COOLDOWN_SECONDS=30s）保持一致，避免前端提示可重试、后端仍拦截的口径割裂
+const RETRY_COOLDOWN_SECONDS = 30;
 let retryCooldownUntil = 0;
 
 /** 剩余冷却秒数（0 = 可重试） */
@@ -1123,6 +1164,10 @@ async function retryLink(btn, index) {
       }
     } else {
       showToast((r && r.error) || "重试失败");
+      // 后端返回了剩余冷却秒数 → 用它对齐前端倒计时（避免「前端可重试、后端仍拦截」）
+      if (r && r.cooldown_remaining) {
+        retryCooldownUntil = Date.now() + (Number(r.cooldown_remaining) || 30) * 1000;
+      }
       armRetryCooldown(btn, oldText);  // 失败也进入冷却，防连续重试
     }
   } catch (e) {
@@ -1144,14 +1189,23 @@ function renderSingleResult(r, index) {
 }
 
 async function retryFailedLinks() {
-  const failed = latestResults.filter(r => !r.success && r.original_url);
-  if (!failed.length || extractingNow) return;
+  // 跳过 cached_fail：确定性失败（链接无效/凭证失效/残缺）10 分钟内重试无意义，
+  // 且 force 重试会绕过失败缓存真实打平台，应引导用户换链接而非盲目重试
+  const failed = latestResults.filter(r => !r.success && r.original_url && !r.cached_fail);
+  const skipped = latestResults.filter(r => !r.success && r.cached_fail);
+  if (extractingNow) return;
+  if (!failed.length) {
+    if (skipped.length) {
+      showToast(`${skipped.length} 条链接已被识别为无效/不完整（近期失败），请从 App 重新复制后再试`);
+    }
+    return;
+  }
   if (!tryAcquireRetry()) return;  // 冷却中，阻止本次批量重试
   const btn = document.getElementById("btnRetryFailed");
   const oldText = btn.textContent;
   document.getElementById("inputUrls").value = failed.map(r => r.original_url).join("\n");
   updateLinkCount();
-  showToast(`正在重试 ${failed.length} 条失败链接`);
+  showToast(skipped.length ? `重试 ${failed.length} 条失败链接（已跳过 ${skipped.length} 条无效/不完整链接）` : `正在重试 ${failed.length} 条失败链接`);
   await doExtract(false, true);  // force=true：绕过失败缓存真实重试
   armRetryCooldown(btn, oldText);  // 批量重试后也进入冷却
 }
