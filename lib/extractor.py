@@ -172,12 +172,61 @@ XHS_HEADERS = {
     "Referer": "https://www.xiaohongshu.com/",
 }
 
+# ---------------------------------------------------------------- 平台请求闸门
+# 月底创作者高峰多人同时批量提取时，多 worker 会瞬时打出大量平台请求，
+# 极易触发抖音/小红书风控。全局闸门限制每个平台的并发数与最小请求间隔：
+# - 抖音：默认最多 2 个并发请求、间隔 ≥ 0.8s（此前抖音无全局节流，本次新增）
+# - 小红书：串行 + 间隔 ≥ 1.0s（原 0.25s 对数据中心 IP 偏高，调大降低触发概率）
+# 均可用环境变量覆盖，无需改代码即可调参。
+
+def _float_env(name: str, default: float, lo: float = 0.0, hi: float = 60.0) -> float:
+    try:
+        val = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        val = default
+    return min(hi, max(lo, val))
+
+
+class _PlatformGate:
+    """平台请求闸门：限制全局并发数与最小请求间隔（线程安全）。
+
+    多个 worker 线程（批量提取/多用户并发）共享同一闸门，
+    超出并发上限的请求阻塞排队，避免瞬时请求洪峰触发平台风控。
+    """
+
+    def __init__(self, name: str, max_concurrency: int, min_interval: float):
+        self.name = name
+        self._sem = threading.BoundedSemaphore(max_concurrency)
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+        self._min_interval = max(0.0, min_interval)
+
+    def acquire(self) -> None:
+        """获取许可：并发超限时排队等待；同时保证与上一次请求的最小间隔。"""
+        self._sem.acquire()
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next_at - now
+            self._next_at = max(now, self._next_at) + self._min_interval
+        if wait > 0:
+            time.sleep(wait)
+
+    def release(self) -> None:
+        self._sem.release()
+
+
+DOUYIN_GATE = _PlatformGate(
+    "douyin",
+    max_concurrency=int(os.environ.get("DOUYIN_GATE_CONCURRENCY", "2")),
+    min_interval=_float_env("DOUYIN_GATE_INTERVAL", 0.8),
+)
+
 # 每个 Gunicorn worker 内串行化小红书页面请求，并保留很短的自然间隔。
 # 批量任务此前只有通用抖动，多个线程仍可能同时打到小红书而触发临时验证页。
 _xhs_request_slot = threading.BoundedSemaphore(1)
 _xhs_schedule_lock = threading.Lock()
 _xhs_next_request_at = 0.0
-XHS_MIN_REQUEST_GAP_SECONDS = 0.25
+XHS_MIN_REQUEST_GAP_SECONDS = _float_env("XHS_MIN_REQUEST_GAP_SECONDS", 1.0)
 
 _dns_cache: dict[str, tuple[tuple[str, ...], float]] = {}
 _dns_cache_lock = threading.Lock()
@@ -509,6 +558,19 @@ def _douyin_target(url: str) -> tuple[str, str]:
 
 
 def _extract_douyin(url: str, telemetry: Optional[dict[str, int]] = None) -> dict[str, Any]:
+    """抖音提取入口：先过全局请求闸门（限制并发与间隔），再执行真实提取。
+
+    闸门可被环境变量覆盖（DOUYIN_GATE_CONCURRENCY / DOUYIN_GATE_INTERVAL），
+    用于月底创作者高峰多人同时批量提取时防止瞬时请求洪峰触发风控。
+    """
+    DOUYIN_GATE.acquire()
+    try:
+        return _extract_douyin_locked(url, telemetry)
+    finally:
+        DOUYIN_GATE.release()
+
+
+def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None) -> dict[str, Any]:
     """抖音提取：移动端分享页 _ROUTER_DATA JSON 解析。
 
     SDK 原版策略：Session 保持 cookie + 首次响应优先解析；解析不出

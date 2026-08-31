@@ -22,6 +22,7 @@ import re
 import secrets
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 import csv
@@ -156,6 +157,31 @@ def _fail_cache_put(url: str, error: str, hint: str) -> None:
         if len(_fail_cache) > _FAIL_CACHE_MAX:
             for k in sorted(_fail_cache, key=lambda u: _fail_cache[u][0])[: len(_fail_cache) // 2]:
                 _fail_cache.pop(k, None)
+
+
+# ---------------------------------------------------------------- 同 URL 请求冷却
+
+# 防止同一链接被疯狂重试：无论成败，同一 URL 在冷却期内只允许一次真实平台请求。
+# - 失败负缓存只拦「失败」链接；用户点「重试」传 force=true 绕过缓存后仍可能反复打平台
+# - 冷却独立于 force，冷却期内任何重试直接返回友好提示，不产生平台请求
+_URL_COOLDOWN_SECONDS = float(os.environ.get("URL_COOLDOWN_SECONDS", "30"))
+_url_cooldown: dict[str, float] = {}  # url -> 下次允许真实请求的时间戳
+_url_cooldown_lock = threading.Lock()
+
+
+def _url_cooldown_check(url: str) -> bool:
+    """返回 True 允许真实请求；False 表示冷却期内拒绝（并已顺带清理过期项）。"""
+    now = time.time()
+    with _url_cooldown_lock:
+        allowed_at = _url_cooldown.get(url, 0.0)
+        if now < allowed_at:
+            return False
+        _url_cooldown[url] = now + _URL_COOLDOWN_SECONDS
+        if len(_url_cooldown) > 2000:  # 防内存膨胀：清理过期项
+            for k, v in list(_url_cooldown.items()):
+                if v <= now:
+                    _url_cooldown.pop(k, None)
+        return True
 
 
 # ---------------------------------------------------------------- 请求日志
@@ -565,6 +591,24 @@ def api_extract():
                     "partial": False, "cache_hit": False, "telemetry": None,
                     "cached_fail": True,
                 }
+
+        # 同 URL 冷却：冷却期内拒绝真实请求（防同一链接疯狂重试；独立于 force，
+        # force 只绕过失败缓存，仍受冷却约束）
+        if not _url_cooldown_check(url):
+            log.info("同 URL 冷却拦截: %s", url[:60])
+            return {
+                "original_url": url,
+                "success": False,
+                "platform": "", "platform_raw": "",
+                "title": "", "caption": "", "author_name": "",
+                "publish_time": "", "like_count": 0,
+                "video_url": "", "canonical_url": "", "cover_url": "",
+                "post_id": "",
+                "error": f"该链接请求过于频繁，请 {int(_URL_COOLDOWN_SECONDS)} 秒后再试",
+                "hint": "同一链接短时间内只能提取一次，避免触发平台风控",
+                "partial": False, "cache_hit": False, "telemetry": None,
+                "cooldown": True,
+            }
 
         result = extract_link(url)
         item = {
