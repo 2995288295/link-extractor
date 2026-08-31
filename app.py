@@ -808,6 +808,59 @@ def api_stats():
     return jsonify(resp)
 
 
+@app.route("/api/notice", methods=["GET"])
+def api_notice():
+    """高峰/风控风险提示：实时计算全局近 5 分钟请求频率与失败率，返回风险等级。
+
+    - normal：一切正常（前端隐藏提示条）
+    - busy：请求量偏高（月底高峰多人同时使用），提示用户如遇失败稍后再试
+    - risk：失败率异常升高（疑似平台风控/限流），提示用户暂停操作、避免连续重试
+    判定基于全局 history（不按设备隔离，因为高峰/风控是全局现象），带轻量限速。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    if not _check_rate_limit(f"notice:{ip}", 30):
+        return jsonify({"success": True, "level": "normal", "message": ""}), 200
+
+    conn = _get_db()
+    try:
+        since = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        row = conn.execute(
+            """
+            SELECT COUNT(*) total,
+                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok
+            FROM history WHERE created_at >= ?
+            """,
+            (since,),
+        ).fetchone()
+        total = row["total"] or 0
+        ok = row["ok"] or 0
+        fail = total - ok
+        fail_rate = round(fail / total * 100, 1) if total else 0.0
+
+        # 风险等级判定（阈值按单服务 2 worker 的承载能力估算）
+        level, message = "normal", ""
+        if total >= 40 and fail_rate >= 50:
+            level = "risk"
+            message = "检测到平台访问受限，为避免触发风控，建议暂停 1 分钟再操作，或从 App 复制最新分享链接。"
+        elif total >= 40:
+            level = "busy"
+            message = "当前使用高峰，平台可能限流，如遇失败建议稍后再试。"
+        elif fail_rate >= 40 and total >= 10:
+            level = "risk"
+            message = "检测到提取失败率偏高，为避免触发风控，请间隔几秒再重试，或从 App 复制最新分享链接。"
+    finally:
+        conn.close()
+
+    return jsonify({
+        "success": True,
+        "level": level,
+        "message": message,
+        "window": "5m",
+        "total": total,
+        "fail_rate": fail_rate,
+    })
+
+
 # ---------------------------------------------------------------- 后台运营看板（管理员）
 
 def _admin_require_rate(ip: str) -> bool:

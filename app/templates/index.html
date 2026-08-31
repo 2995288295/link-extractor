@@ -41,6 +41,35 @@ header { text-align: center; padding: 30px 0 22px; }
 header h1 { font-size: 27px; font-weight: 750; letter-spacing: -.04em; margin-top: 4px; }
 header p { color: var(--text2); font-size: 14px; margin: 7px auto 0; max-width: 560px; }
 
+/* 高峰/风控风险提示条 */
+.risk-banner {
+  display: none;
+  align-items: flex-start;
+  gap: 10px;
+  background: #fff8e6;
+  border: 1px solid #f0d48a;
+  border-radius: 10px;
+  padding: 11px 14px;
+  margin-bottom: 16px;
+  color: #7a5a10;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.risk-banner.visible { display: flex; }
+.risk-banner .banner-icon { font-size: 16px; line-height: 1.4; }
+.risk-banner .banner-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #a8863a;
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1.3;
+  flex-shrink: 0;
+}
+.risk-banner .banner-close:hover { color: #6b4d0d; }
+
 .card {
   background: var(--card);
   border: 1px solid rgba(219, 227, 238, .95);
@@ -351,6 +380,13 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
     <p>粘贴抖音 / 小红书分享链接，批量提取转换链接与文案，逐条复制</p>
   </header>
 
+  <!-- 高峰/风控风险提示条：仅在有风险时显示，可手动关闭 -->
+  <div class="risk-banner" id="riskBanner" role="status" aria-live="polite">
+    <span class="banner-icon">⚠️</span>
+    <span class="banner-text" id="riskBannerText"></span>
+    <button class="banner-close" type="button" onclick="dismissRiskBanner()" aria-label="关闭提示">×</button>
+  </div>
+
   <div class="tab-bar" role="tablist" aria-label="功能导航">
     <button class="tab active" id="tab-button-extract" role="tab" aria-selected="true" aria-controls="tab-extract" data-tab="extract" onclick="switchTab('extract')" onkeydown="handleTabKey(event)">提取</button>
     <button class="tab" id="tab-button-stats" role="tab" aria-selected="false" aria-controls="tab-stats" data-tab="stats" onclick="switchTab('stats')" onkeydown="handleTabKey(event)">统计</button>
@@ -396,7 +432,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.2</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.3</div>
   </footer>
 </div>
 
@@ -941,10 +977,50 @@ async function extractOneStream(url, force) {
 }
 
 /** 重试单条失败链接：重新提取并替换该卡片 */
+// ================= 重试节流（防风控） =================
+// 单条重试与批量重试共享全局冷却：避免用户连续点重试对平台打出瞬时请求洪峰
+const RETRY_COOLDOWN_SECONDS = 15;
+let retryCooldownUntil = 0;
+
+/** 剩余冷却秒数（0 = 可重试） */
+function retryCooldownLeft() {
+  return Math.max(0, Math.ceil((retryCooldownUntil - Date.now()) / 1000));
+}
+
+/** 尝试发起重试：冷却中返回 false 并提示，否则启动冷却返回 true */
+function tryAcquireRetry() {
+  const left = retryCooldownLeft();
+  if (left > 0) {
+    showToast(`为避免触发平台风控，请 ${left} 秒后再试`);
+    return false;
+  }
+  retryCooldownUntil = Date.now() + RETRY_COOLDOWN_SECONDS * 1000;
+  return true;
+}
+
+/** 按钮进入冷却倒计时：置灰并每秒刷新剩余秒数，结束后恢复 */
+function armRetryCooldown(btn, oldText) {
+  btn.dataset.retryOldText = oldText;
+  btn.dataset.retryCooldownEnd = String(retryCooldownUntil);
+  btn.disabled = true;
+  const tick = () => {
+    const left = retryCooldownLeft();
+    if (left > 0) {
+      btn.textContent = `⏳ ${left}s 后可重试`;
+      setTimeout(tick, 1000);
+    } else {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.retryOldText || oldText;
+    }
+  };
+  tick();
+}
+
 async function retryLink(btn, index) {
   const card = btn.closest(".result-item");
   const target = card && card.dataset.originalUrl;
   if (!target) { showToast("找不到原始链接，请重新粘贴"); return; }
+  if (!tryAcquireRetry()) return;  // 冷却中，阻止本次重试
 
   const oldText = btn.textContent;
   btn.disabled = true;
@@ -968,13 +1044,11 @@ async function retryLink(btn, index) {
       }
     } else {
       showToast((r && r.error) || "重试失败");
-      btn.disabled = false;
-      btn.textContent = oldText;
+      armRetryCooldown(btn, oldText);  // 失败也进入冷却，防连续重试
     }
   } catch (e) {
     showToast("重试失败：" + (e.message || "网络错误"));
-    btn.disabled = false;
-    btn.textContent = oldText;
+    armRetryCooldown(btn, oldText);
   }
 }
 
@@ -993,10 +1067,14 @@ function renderSingleResult(r, index) {
 async function retryFailedLinks() {
   const failed = latestResults.filter(r => !r.success && r.original_url);
   if (!failed.length || extractingNow) return;
+  if (!tryAcquireRetry()) return;  // 冷却中，阻止本次批量重试
+  const btn = document.getElementById("btnRetryFailed");
+  const oldText = btn.textContent;
   document.getElementById("inputUrls").value = failed.map(r => r.original_url).join("\n");
   updateLinkCount();
   showToast(`正在重试 ${failed.length} 条失败链接`);
   await doExtract(false, true);  // force=true：绕过失败缓存真实重试
+  armRetryCooldown(btn, oldText);  // 批量重试后也进入冷却
 }
 
 /** 重新编号所有结果卡片索引 */
@@ -1168,7 +1246,39 @@ async function clearHistory() {
 // 口令模块已隐藏（服务端未启用 ACCESS_TOKEN 时不校验），打开即用
 window.addEventListener("load", function () {
   // 预留：若以后恢复访问口令，可在此调用 apiFetch("/api/history") 验证
+  initRiskBanner();
 });
+
+// ================= 高峰/风控风险提示 =================
+let riskBannerDismissedUntil = 0;  // 用户手动关闭后 5 分钟内不再打扰
+
+async function pollRiskNotice() {
+  try {
+    const res = await fetch("/api/notice", { headers: buildHeaders() });
+    if (!res.ok) return;
+    const d = await res.json();
+    if (!d || !d.success) return;
+    const banner = document.getElementById("riskBanner");
+    const text = document.getElementById("riskBannerText");
+    if (d.level === "busy" || d.level === "risk") {
+      if (Date.now() < riskBannerDismissedUntil) return;  // 用户刚关闭，静默
+      text.textContent = d.message || "当前平台访问压力较大，如遇失败请稍后再试。";
+      banner.classList.add("visible");
+    } else {
+      banner.classList.remove("visible");
+    }
+  } catch (e) { /* 网络波动忽略，下次轮询再试 */ }
+}
+
+function dismissRiskBanner() {
+  document.getElementById("riskBanner").classList.remove("visible");
+  riskBannerDismissedUntil = Date.now() + 5 * 60 * 1000;  // 5 分钟不再显示
+}
+
+function initRiskBanner() {
+  pollRiskNotice();                                  // 进页立即查一次
+  setInterval(pollRiskNotice, 60 * 1000);            // 之后每 60 秒轮询
+}
 </script>
 </body>
 </html>
