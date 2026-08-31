@@ -70,6 +70,69 @@ header p { color: var(--text2); font-size: 14px; margin: 7px auto 0; max-width: 
 }
 .risk-banner .banner-close:hover { color: #6b4d0d; }
 
+/* 运营公告弹窗：服务端配置公告时触发，关闭后 7 天内不再弹 */
+.announce-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(22, 38, 59, .45);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.announce-overlay.visible { display: flex; }
+.announce-modal {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 18px 50px rgba(22, 38, 59, .28);
+  width: 100%;
+  max-width: 460px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: announce-in .22s ease-out;
+}
+@keyframes announce-in {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.announce-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid rgba(219, 227, 238, .7);
+}
+.announce-head .announce-icon { font-size: 20px; line-height: 1; }
+.announce-head .announce-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.announce-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  font-size: 18px;
+  color: var(--text2);
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+}
+.announce-close:hover { color: var(--text); }
+.announce-body {
+  padding: 16px 20px;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text);
+  white-space: pre-line;
+  overflow-y: auto;
+}
+.announce-foot {
+  padding: 12px 20px 16px;
+  text-align: right;
+  border-top: 1px solid rgba(219, 227, 238, .5);
+}
+
 .card {
   background: var(--card);
   border: 1px solid rgba(219, 227, 238, .95);
@@ -387,6 +450,22 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
     <button class="banner-close" type="button" onclick="dismissRiskBanner()" aria-label="关闭提示">×</button>
   </div>
 
+  <!-- 运营公告弹窗：服务端配置公告时触发，关闭后 7 天内不再弹 -->
+  <div class="announce-overlay" id="announceOverlay" role="dialog" aria-modal="true" aria-labelledby="announceTitle"
+       onclick="if(event.target===this)dismissAnnouncement()">
+    <div class="announce-modal">
+      <div class="announce-head">
+        <span class="announce-icon">📢</span>
+        <span class="announce-title" id="announceTitle">公告</span>
+        <button class="announce-close" type="button" onclick="dismissAnnouncement()" aria-label="关闭公告">×</button>
+      </div>
+      <div class="announce-body" id="announceText"></div>
+      <div class="announce-foot">
+        <button class="btn btn-primary" type="button" onclick="dismissAnnouncement()">我知道了</button>
+      </div>
+    </div>
+  </div>
+
   <div class="tab-bar" role="tablist" aria-label="功能导航">
     <button class="tab active" id="tab-button-extract" role="tab" aria-selected="true" aria-controls="tab-extract" data-tab="extract" onclick="switchTab('extract')" onkeydown="handleTabKey(event)">提取</button>
     <button class="tab" id="tab-button-stats" role="tab" aria-selected="false" aria-controls="tab-stats" data-tab="stats" onclick="switchTab('stats')" onkeydown="handleTabKey(event)">统计</button>
@@ -432,7 +511,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.3</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.4</div>
   </footer>
 </div>
 
@@ -1258,6 +1337,10 @@ async function pollRiskNotice() {
     if (!res.ok) return;
     const d = await res.json();
     if (!d || !d.success) return;
+    // 运营公告：有配置才弹，关闭后 7 天内不再弹
+    if (d.announcement) {
+      showAnnouncement(d.announcement, d.announcement_id || "");
+    }
     const banner = document.getElementById("riskBanner");
     const text = document.getElementById("riskBannerText");
     if (d.level === "busy" || d.level === "risk") {
@@ -1269,6 +1352,46 @@ async function pollRiskNotice() {
     }
   } catch (e) { /* 网络波动忽略，下次轮询再试 */ }
 }
+
+// ================= 运营公告弹窗 =================
+let announcementShownThisSession = false;  // 本会话只弹一次，避免轮询中重复弹出
+
+function simpleHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function showAnnouncement(text, id) {
+  if (!text || announcementShownThisSession) return;
+  const realId = id || simpleHash(text);  // 无 ID 时按内容哈希：内容变更视为新公告
+  try {
+    const seen = localStorage.getItem("announcement_seen_" + realId);
+    if (seen) {
+      const ts = parseInt(seen, 10) || 0;
+      if (Date.now() - ts < 7 * 24 * 3600 * 1000) return;  // 7 天内已读，不再打扰
+    }
+  } catch (e) { /* 隐私模式等异常：照常弹窗 */ }
+  announcementShownThisSession = true;
+  const overlay = document.getElementById("announceOverlay");
+  overlay.dataset.announceId = realId;
+  document.getElementById("announceText").textContent = text;
+  overlay.classList.add("visible");
+}
+
+function dismissAnnouncement() {
+  const overlay = document.getElementById("announceOverlay");
+  overlay.classList.remove("visible");
+  const id = overlay.dataset.announceId || "";
+  try {
+    localStorage.setItem("announcement_seen_" + id, String(Date.now()));
+  } catch (e) { /* 忽略 */ }
+}
+
+// Esc 键也可关闭公告
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") dismissAnnouncement();
+});
 
 function dismissRiskBanner() {
   document.getElementById("riskBanner").classList.remove("visible");

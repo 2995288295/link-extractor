@@ -75,6 +75,17 @@ ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 DEVICE_SECRET = _load_device_secret()
 
+# 运营公告：环境变量 ANNOUNCEMENT 配置（空串=无公告，前端不弹窗）。
+# 多行内容用字面 \n 分隔（env 文件里写 ANNOUNCEMENT=第一行\n第二行）。
+# ANNOUNCEMENT_ID 为公告标识（用于前端「已读 7 天」记忆）；不设置时按内容哈希生成，
+# 内容变更即视为新公告、用户会再次看到。
+ANNOUNCEMENT = os.environ.get("ANNOUNCEMENT", "").strip().replace("\\n", "\n")
+if ANNOUNCEMENT:
+    _announce_id = os.environ.get("ANNOUNCEMENT_ID", "").strip()
+    _ANNOUNCEMENT_ID = _announce_id if _announce_id else str(abs(hash(ANNOUNCEMENT)))
+else:
+    _ANNOUNCEMENT_ID = ""
+
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     """读取受限整数环境变量，避免错误配置耗尽线程或触发平台风控。"""
@@ -169,19 +180,23 @@ _url_cooldown: dict[str, float] = {}  # url -> 下次允许真实请求的时间
 _url_cooldown_lock = threading.Lock()
 
 
-def _url_cooldown_check(url: str) -> bool:
-    """返回 True 允许真实请求；False 表示冷却期内拒绝（并已顺带清理过期项）。"""
+def _url_cooldown_check(url: str) -> float:
+    """返回剩余冷却秒数（0 = 允许真实请求）；冷却期内拒绝并顺带清理过期项。
+
+    调用方可用返回值生成友好提示（如「请 X 秒后再试」），并把剩余秒数透传给前端，
+    让前端倒计时与后端冷却保持一致，避免「前端说可重试、后端仍拦截」的口径割裂。
+    """
     now = time.time()
     with _url_cooldown_lock:
         allowed_at = _url_cooldown.get(url, 0.0)
         if now < allowed_at:
-            return False
+            return allowed_at - now
         _url_cooldown[url] = now + _URL_COOLDOWN_SECONDS
         if len(_url_cooldown) > 2000:  # 防内存膨胀：清理过期项
             for k, v in list(_url_cooldown.items()):
                 if v <= now:
                     _url_cooldown.pop(k, None)
-        return True
+        return 0.0
 
 
 # ---------------------------------------------------------------- 请求日志
@@ -555,7 +570,7 @@ def api_extract():
                     device_id, item["original_url"], item["canonical_url"], item["platform"],
                     item["title"], item["caption"], item["author_name"], item["publish_time"],
                     item["like_count"], item["video_url"], item["cover_url"],
-                    "success" if item["success"] else "error",
+                    item.get("status") or ("success" if item["success"] else "error"),
                     item["error"] if not item["success"] else "",
                     item["duration_ms"], int(item["cache_hit"]), item["outcome_class"],
                     int((item.get("telemetry") or {}).get("retry_count") or 0),
@@ -580,7 +595,7 @@ def api_extract():
             if cached:
                 cached_error, cached_hint = cached
                 log.info("失败缓存命中，跳过平台请求: %s (%s)", url[:60], cached_error)
-                return {
+                item = {
                     "original_url": url,
                     "success": False,
                     "platform": "", "platform_raw": "",
@@ -590,13 +605,19 @@ def api_extract():
                     "post_id": "", "error": cached_error, "hint": cached_hint,
                     "partial": False, "cache_hit": False, "telemetry": None,
                     "cached_fail": True,
+                    "duration_ms": round((time.monotonic() - started_at) * 1000),
+                    "status": "blocked", "outcome_class": "blocked_cache",
                 }
+                if record_history:
+                    _save_to_db(item)
+                return item
 
         # 同 URL 冷却：冷却期内拒绝真实请求（防同一链接疯狂重试；独立于 force，
         # force 只绕过失败缓存，仍受冷却约束）
-        if not _url_cooldown_check(url):
-            log.info("同 URL 冷却拦截: %s", url[:60])
-            return {
+        cooldown_left = _url_cooldown_check(url)
+        if cooldown_left > 0:
+            log.info("同 URL 冷却拦截: %s (%ds)", url[:60], int(cooldown_left) + 1)
+            item = {
                 "original_url": url,
                 "success": False,
                 "platform": "", "platform_raw": "",
@@ -604,11 +625,16 @@ def api_extract():
                 "publish_time": "", "like_count": 0,
                 "video_url": "", "canonical_url": "", "cover_url": "",
                 "post_id": "",
-                "error": f"该链接请求过于频繁，请 {int(_URL_COOLDOWN_SECONDS)} 秒后再试",
+                "error": f"该链接请求过于频繁，请 {int(cooldown_left) + 1} 秒后再试",
                 "hint": "同一链接短时间内只能提取一次，避免触发平台风控",
                 "partial": False, "cache_hit": False, "telemetry": None,
-                "cooldown": True,
+                "cooldown": True, "cooldown_remaining": int(cooldown_left) + 1,
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+                "status": "blocked", "outcome_class": "blocked_cooldown",
             }
+            if record_history:
+                _save_to_db(item)
+            return item
 
         result = extract_link(url)
         item = {
@@ -819,7 +845,14 @@ def api_notice():
     """
     ip = request.remote_addr or "127.0.0.1"
     if not _check_rate_limit(f"notice:{ip}", 30):
-        return jsonify({"success": True, "level": "normal", "message": ""}), 200
+        # 限速兜底：公告是静态低频数据，即使命中限速也应返回，避免用户错过公告
+        return jsonify({
+            "success": True,
+            "level": "normal",
+            "message": "",
+            "announcement": ANNOUNCEMENT,
+            "announcement_id": _ANNOUNCEMENT_ID,
+        }), 200
 
     conn = _get_db()
     try:
@@ -855,6 +888,8 @@ def api_notice():
         "success": True,
         "level": level,
         "message": message,
+        "announcement": ANNOUNCEMENT,
+        "announcement_id": _ANNOUNCEMENT_ID,
         "window": "5m",
         "total": total,
         "fail_rate": fail_rate,
@@ -988,24 +1023,74 @@ def api_admin_overview():
             "service_failures": row["service_failures"] or 0,
         }
 
+    # ---- 风控风险判定：平台失败率 + 疑似风控错误聚类 ----
+    risk = {"level": "ok", "title": "", "detail": "", "platforms": {}, "suspect_count": 0}
+    suspect_count = conn.execute(
+        """
+        SELECT COUNT(*) c FROM history WHERE created_at >= ?
+          AND status != 'success'
+          AND (lower(error) LIKE '%风控%' OR lower(error) LIKE '%限制访问%'
+               OR lower(error) LIKE '%验证%' OR lower(error) LIKE '%captcha%'
+               OR lower(error) LIKE '%challenge%' OR lower(error) LIKE '%暂时%')
+        """, (since,)
+    ).fetchone()["c"] or 0
+    risk["suspect_count"] = suspect_count
+    for name, h in platform_health.items():
+        if h["total"] < 5:  # 样本过少不判定
+            continue
+        fail_rate = h["fail"] / h["total"] * 100 if h["total"] else 0
+        service_fail_rate = h["service_failures"] / h["total"] * 100 if h["total"] else 0
+        entry = {"fail_rate": round(fail_rate, 1), "service_failures": h["service_failures"], "total": h["total"]}
+        if fail_rate >= 50 or service_fail_rate >= 30:
+            risk["level"] = "risk"
+            risk["platforms"][name] = entry
+        elif fail_rate >= 25 or service_fail_rate >= 15:
+            if risk["level"] == "ok":
+                risk["level"] = "warn"
+            risk["platforms"][name] = entry
+    if risk["level"] != "ok" or suspect_count >= 10:
+        if risk["level"] == "ok":
+            risk["level"] = "warn"
+        names = "、".join(risk["platforms"]) or "平台"
+        risk["title"] = "平台风控或上游异常" if risk["level"] == "risk" else "平台波动预警"
+        risk["detail"] = f"近{window}内 {names} 失败率偏高（疑似风控/上游异常 {suspect_count} 条），建议关注服务器 IP 状态与平台策略。"
+    elif suspect_count >= 3:
+        risk["level"] = "warn"
+        risk["title"] = "疑似风控信号"
+        risk["detail"] = f"近{window}内检测到 {suspect_count} 条疑似风控错误，请关注平台状态。"
+
+    # ---- 趋势（含平台分线，一次分组查询）----
     trend = []
     today = datetime.now()
     points = 1 if days == 1 else days
+    day_rows = conn.execute(
+        """
+        SELECT substr(created_at, 1, 10) day,
+               COUNT(*) cnt,
+               SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok,
+               SUM(CASE WHEN platform = 'douyin'
+                     OR (platform = '' AND (lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%'))
+                   THEN 1 ELSE 0 END) dy,
+               SUM(CASE WHEN platform = 'xiaohongshu'
+                     OR (platform = '' AND (lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%'))
+                   THEN 1 ELSE 0 END) xhs
+        FROM history WHERE created_at >= ?
+        GROUP BY day
+        """, (since,)
+    ).fetchall()
+    day_map = {r["day"]: r for r in day_rows}
     for i in range(points - 1, -1, -1):
         day = today - timedelta(days=i)
-        day_str = day.strftime("%Y-%m-%d")
-        cnt = conn.execute(
-            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ?", (day_str + "%", since)
-        ).fetchone()["c"]
-        ok_cnt = conn.execute(
-        "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ? AND outcome_class = 'success'",
-            (day_str + "%", since),
-        ).fetchone()["c"]
+        r = day_map.get(day.strftime("%Y-%m-%d"))
+        cnt = r["cnt"] if r else 0
+        ok_cnt = r["ok"] if r else 0
         trend.append({
             "date": day.strftime("%m-%d"),
             "count": cnt,
             "ok": ok_cnt,
             "fail": cnt - ok_cnt,
+            "douyin": r["dy"] if r else 0,
+            "xiaohongshu": r["xhs"] if r else 0,
         })
     conn.close()
 
@@ -1026,6 +1111,7 @@ def api_admin_overview():
         "today_count": today_count,
         "platform_dist": platform_dist,
         "platform_health": platform_health,
+        "risk": risk,
         "trend": trend,
     })
 
@@ -1105,6 +1191,51 @@ def api_admin_errors():
     conn.close()
     errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
     return jsonify({"success": True, "range": window, "errors": errors})
+
+
+@app.route("/api/admin/retry_hot", methods=["GET"])
+def api_admin_retry_hot():
+    """重试热点：同一链接被高频提交 TOP 20（URL 中段脱敏，不含分享凭证）。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    window, _, since = _admin_window()
+    conn = _get_db()
+    rows = conn.execute(
+        """
+        SELECT original_url,
+               COUNT(*) c,
+               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok,
+               MAX(created_at) last_at
+        FROM history
+        WHERE created_at >= ? AND original_url != ''
+        GROUP BY original_url
+        ORDER BY c DESC LIMIT 20
+        """, (since,)
+    ).fetchall()
+    conn.close()
+
+    def _mask_url(url: str) -> str:
+        url = (url or "").strip()
+        if len(url) <= 60:
+            return url
+        return url[:30] + "..." + url[-20:]
+
+    items = []
+    for r in rows:
+        url = r["original_url"]
+        plat = "抖音" if ("douyin" in url or "iesdouyin" in url) else (
+            "小红书" if ("xiaohongshu" in url or "xhslink" in url) else "其他")
+        items.append({
+            "url": _mask_url(url),
+            "platform": plat,
+            "count": r["c"],
+            "ok": r["ok"] or 0,
+            "fail": r["c"] - (r["ok"] or 0),
+            "last_at": r["last_at"],
+        })
+    return jsonify({"success": True, "range": window, "items": items})
 
 
 @app.route("/api/admin/performance", methods=["GET"])

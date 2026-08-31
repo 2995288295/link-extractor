@@ -212,6 +212,17 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
       <div class="more-row"><button id="deviceMore" type="button">展开全部设备</button></div>
     </div>
 
+    <div class="card">
+      <h2>重试热点链接 TOP（同一链接高频提交）</h2>
+      <div class="table-scroll" style="max-height:260px;">
+        <table>
+          <thead><tr><th>链接（脱敏）</th><th>平台</th><th class="num">提交次数</th><th class="num">成功</th><th class="num">失败</th><th>最后提交</th></tr></thead>
+          <tbody id="retryHotBody"></tbody>
+        </table>
+      </div>
+      <div id="retryHotEmpty" class="empty hidden">窗口内无高频重试链接</div>
+    </div>
+
     <div class="grid2 bottom-grid">
       <div class="card">
         <h2>失败原因 TOP</h2>
@@ -227,7 +238,7 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
     </div>
   </div>
 
-  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.0</div>
+  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.4</div>
 </div>
 
 <div id="loginOverlay">
@@ -322,35 +333,30 @@ function renderTrend(trend) {
   const max = Math.max(...trend.map(t => t.count), 1);
   const w = 360, h = 110, pad = 18;
   const step = (w - pad * 2) / Math.max(trend.length - 1, 1);
-  const pts = trend.map((t, i) => {
-    const x = pad + i * step;
-    const y = h - pad - (t.count / max) * (h - pad * 2);
-    return [x, y];
-  });
-  const line = pts.map(p => p.join(",")).join(" ");
-  const okPts = trend.map((t, i) => {
-    const x = pad + i * step;
-    const y = h - pad - ((t.ok || 0) / max) * (h - pad * 2);
-    return [x, y];
-  });
-  const dots = pts.map((p, i) =>
-    `<circle data-trend-index="${i}" cx="${p[0]}" cy="${p[1]}" r="4" fill="#1769e0" style="cursor:crosshair"><title>${trend[i].date} 共${trend[i].count}条 成功${trend[i].ok}</title></circle>`
-  ).join("");
+  const yOf = v => h - pad - ((v || 0) / max) * (h - pad * 2);
+  const lineOf = key => trend.map((t, i) => [pad + i * step, yOf(t[key])]);
+  const poly = key => lineOf(key).map(p => p.join(",")).join(" ");
+  const dots = trend.map((t, i) => {
+    const p = [pad + i * step, yOf(t.count)];
+    return `<circle data-trend-index="${i}" cx="${p[0]}" cy="${p[1]}" r="4" fill="#1769e0" style="cursor:crosshair"><title>${trend[i].date} 共${trend[i].count}条 成功${trend[i].ok}</title></circle>`;
+  }).join("");
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;">
       <line x1="${pad}" y1="${h - pad}" x2="${w - pad}" y2="${h - pad}" stroke="#dbe3ee" stroke-width="1"/>
-      <polyline points="${line}" fill="none" stroke="#1769e0" stroke-width="2"/>
-      <polyline points="${okPts.map(p => p.join(",")).join(" ")}" fill="none" stroke="#18a866" stroke-width="2" stroke-dasharray="4 3"/>
+      <polyline points="${poly("count")}" fill="none" stroke="#1769e0" stroke-width="2"/>
+      <polyline points="${poly("ok")}" fill="none" stroke="#18a866" stroke-width="2" stroke-dasharray="4 3"/>
+      <polyline points="${poly("douyin")}" fill="none" stroke="#1a1a1a" stroke-width="1.5" stroke-opacity="0.55"/>
+      <polyline points="${poly("xiaohongshu")}" fill="none" stroke="#d63384" stroke-width="1.5" stroke-opacity="0.65"/>
       ${dots}
     </svg>
     <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);">
       ${trend.map(t => `<span>${esc(t.date)}</span>`).join("")}
-    </div><div style="font-size:11px;color:var(--text2);margin-top:3px;">蓝线 总提取 · 绿虚线 成功</div>`;
+    </div><div style="font-size:11px;color:var(--text2);margin-top:3px;"><span style="color:#1769e0;font-weight:600;">━</span> 总提取 · <span style="color:#18a866;font-weight:600;">┅</span> 成功 · <span style="color:#1a1a1a;font-weight:600;">━</span> 抖音 · <span style="color:#d63384;font-weight:600;">━</span> 小红书</div>`;
   const tip = document.getElementById("chartTip");
   el.querySelectorAll("circle[data-trend-index]").forEach(dot => {
     dot.addEventListener("mouseenter", () => {
       const item = trend[Number(dot.dataset.trendIndex)];
-      tip.innerHTML = `<strong>${esc(item.date)}</strong><br>提取 ${fmt(item.count)} 条 · 成功 ${fmt(item.ok)}<br>失败 ${fmt(item.fail ?? item.count - item.ok)} 条`;
+      tip.innerHTML = `<strong>${esc(item.date)}</strong><br>提取 ${fmt(item.count)} 条 · 成功 ${fmt(item.ok)} · 失败 ${fmt(item.fail ?? item.count - item.ok)} 条<br>抖音 ${fmt(item.douyin ?? 0)} · 小红书 ${fmt(item.xiaohongshu ?? 0)}`;
       const wrap = tip.parentElement.getBoundingClientRect();
       const rect = dot.getBoundingClientRect();
       tip.style.left = `${Math.max(4, rect.left - wrap.left - 28)}px`;
@@ -394,19 +400,28 @@ function renderServiceStatus(health, ov, perf) {
   const p95 = Number(perf.p95_duration_ms || 0);
   const uptimeLabel = health && Number.isFinite(Number(health.uptime_seconds)) ? formatUptime(health.uptime_seconds) : "未连接";
   document.getElementById("headerUptime").textContent = `运行 ${uptimeLabel}`;
+  const risk = ov.risk || {};
   let state = "ok";
   strip.className = "status-strip";
-  if (!health || health.status !== "ok") {
-    state = "bad"; strip.classList.add("bad"); text.textContent = "服务异常：健康检查未通过";
+  let msg = "";
+  if (risk.level === "risk") {
+    state = "bad"; strip.classList.add("bad");
+    msg = `⚠️ ${risk.title}：${risk.detail}`;
+  } else if (!health || health.status !== "ok") {
+    state = "bad"; strip.classList.add("bad"); msg = "服务异常：健康检查未通过";
+  } else if (risk.level === "warn") {
+    state = "warn"; strip.classList.add("warn");
+    msg = `⚠️ ${risk.title}：${risk.detail}`;
   } else if (rate < 90 || p95 > 5000) {
-    state = "warn"; strip.classList.add("warn"); text.textContent = `需要关注：服务稳定性 ${rate}% · P95 ${fmt(p95)}ms`;
+    state = "warn"; strip.classList.add("warn"); msg = `需要关注：服务稳定性 ${rate}% · P95 ${fmt(p95)}ms`;
   } else {
     const uptime = health && Number.isFinite(Number(health.uptime_seconds)) ? ` · 运行 ${formatUptime(health.uptime_seconds)}` : "";
-    text.textContent = `服务正常：稳定性 ${rate}% · P95 ${fmt(p95)}ms${uptime}`;
+    msg = `服务正常：稳定性 ${rate}% · P95 ${fmt(p95)}ms${uptime}`;
   }
+  text.textContent = msg;
   document.title = state === "ok" ? "运营看板 · 链接提取工具" : "⚠️ 运营看板 · 需要关注";
   if (window._lastDashboardState && window._lastDashboardState !== state && state !== "ok") {
-    showToast(state === "bad" ? "服务异常，请立即检查" : "服务指标需要关注");
+    showToast(state === "bad" ? "服务异常或风控风险，请立即检查" : "服务指标需要关注");
   }
   window._lastDashboardState = state;
 }
@@ -439,6 +454,22 @@ function renderDevices(devices) {
   const more = document.getElementById("deviceMore");
   more.classList.toggle("hidden", filtered.length <= 15);
   more.textContent = expanded.devices ? "收起设备列表" : `展开全部设备（${filtered.length}）`;
+}
+
+function renderRetryHot(items) {
+  const body = document.getElementById("retryHotBody");
+  const empty = document.getElementById("retryHotEmpty");
+  if (!items || !items.length) { body.innerHTML = ""; empty.classList.remove("hidden"); return; }
+  empty.classList.add("hidden");
+  body.innerHTML = items.map(it => `
+    <tr>
+      <td style="font-family:monospace;font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(it.url)}">${esc(it.url)}</td>
+      <td>${esc(it.platform)}</td>
+      <td class="num" style="font-weight:600;">${fmt(it.count)}</td>
+      <td class="num ok">${fmt(it.ok)}</td>
+      <td class="num fail">${fmt(it.fail)}</td>
+      <td style="color:var(--text2);font-size:12px;">${esc((it.last_at || "").slice(5))}</td>
+    </tr>`).join("");
 }
 
 function renderErrors(errors) {
@@ -508,12 +539,13 @@ async function loadAll() {
     const range = document.getElementById("rangeSelect").value;
     document.getElementById("trendTitle").textContent = range === "24h" ? "最近 24 小时提取" : range === "30d" ? "近 30 天提取趋势" : "近 7 天提取趋势";
     const q = `?range=${encodeURIComponent(range)}`;
-    const [ov, dev, errs, recent, perf, healthRes] = await Promise.all([
+    const [ov, dev, errs, recent, perf, hot, healthRes] = await Promise.all([
       adminFetch("/api/admin/overview" + q),
       adminFetch("/api/admin/devices" + q + "&limit=100"),
       adminFetch("/api/admin/errors" + q),
       adminFetch("/api/admin/recent" + q),
       adminFetch("/api/admin/performance" + q),
+      adminFetch("/api/admin/retry_hot" + q),
       fetch("/api/health").then(r => r.json()).catch(() => null),
     ]);
     document.getElementById("mTotal").textContent = fmt(ov.total);
@@ -539,6 +571,7 @@ async function loadAll() {
     renderPlatformHealth(ov.platform_health);
     renderServiceStatus(healthRes, ov, perf);
     renderDevices(dev.devices);
+    renderRetryHot(hot.items);
     renderErrors(errs.errors);
     renderRecent(recent.items);
   } catch (e) {
