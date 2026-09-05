@@ -12,11 +12,11 @@ set -e
 APP_DIR="${APP_DIR:-/opt/link-extractor}"
 SERVICE_NAME="link-extractor"
 PORT="${PORT:-5003}"
-WEB_CONCURRENCY="${WEB_CONCURRENCY:-2}"
-GUNICORN_THREADS="${GUNICORN_THREADS:-2}"
+WEB_CONCURRENCY="${WEB_CONCURRENCY:-1}" # 单实例共享队列与限流状态
+GUNICORN_THREADS="${GUNICORN_THREADS:-4}" # 用线程承接并发用户请求
 
 case "$WEB_CONCURRENCY" in
-    ''|*[!0-9]*) WEB_CONCURRENCY=2 ;;
+    ''|*[!0-9]*) WEB_CONCURRENCY=1 ;;
 esac
 case "$GUNICORN_THREADS" in
     ''|*[!0-9]*) GUNICORN_THREADS=2 ;;
