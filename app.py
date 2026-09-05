@@ -1063,7 +1063,7 @@ def api_admin_performance():
         "p95_duration_ms": round(p95),
         "cache_hits": hits,
         "cache_hit_rate": round(hits / total * 100, 1) if total else 0,
-        "batch_concurrency": EXTRACT_CONCURRENCY,
+        "batch_concurrency": _effective_extract_concurrency(),
         "queue_concurrency": GLOBAL_EXTRACT_CONCURRENCY,
         "douyin_retry_success_attempts": retry_success_attempts,
         "douyin_retry_reasons": retry_reasons,
