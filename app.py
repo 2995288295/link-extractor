@@ -22,7 +22,6 @@ import re
 import secrets
 import sqlite3
 import sys
-import threading
 import time
 import uuid
 import csv
@@ -75,17 +74,6 @@ ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 DEVICE_SECRET = _load_device_secret()
 
-# 运营公告：环境变量 ANNOUNCEMENT 配置（空串=无公告，前端不弹窗）。
-# 多行内容用字面 \n 分隔（env 文件里写 ANNOUNCEMENT=第一行\n第二行）。
-# ANNOUNCEMENT_ID 为公告标识（用于前端「已读 7 天」记忆）；不设置时按内容哈希生成，
-# 内容变更即视为新公告、用户会再次看到。
-ANNOUNCEMENT = os.environ.get("ANNOUNCEMENT", "").strip().replace("\\n", "\n")
-if ANNOUNCEMENT:
-    _announce_id = os.environ.get("ANNOUNCEMENT_ID", "").strip()
-    _ANNOUNCEMENT_ID = _announce_id if _announce_id else str(abs(hash(ANNOUNCEMENT)))
-else:
-    _ANNOUNCEMENT_ID = ""
-
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     """读取受限整数环境变量，避免错误配置耗尽线程或触发平台风控。"""
@@ -98,7 +86,19 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
 
 # 每个批次的外部平台请求并发数。默认 3，兼顾批量速度与平台风控风险。
 EXTRACT_CONCURRENCY = _bounded_int_env("EXTRACT_CONCURRENCY", 3, 1, 5)
-GLOBAL_EXTRACT_CONCURRENCY = _bounded_int_env("GLOBAL_EXTRACT_CONCURRENCY", 3, 1, 6)
+PEAK_EXTRACT_CONCURRENCY = _bounded_int_env("PEAK_EXTRACT_CONCURRENCY", 2, 1, 5)
+
+def _is_peak_calendar_window(now: datetime | None = None) -> bool:
+    """月底和月初自动进入保守并发模式，降低同一出口 IP 的突发请求密度。"""
+    current = now or datetime.now()
+    next_month = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days_in_month = (next_month - timedelta(days=1)).day
+    return current.day <= 5 or current.day > days_in_month - 5
+
+def _effective_extract_concurrency() -> int:
+    return min(EXTRACT_CONCURRENCY, PEAK_EXTRACT_CONCURRENCY) if _is_peak_calendar_window() else EXTRACT_CONCURRENCY
+
+GLOBAL_EXTRACT_CONCURRENCY = _bounded_int_env("GLOBAL_EXTRACT_CONCURRENCY", 2, 1, 6)
 _extract_queue = ThreadPoolExecutor(max_workers=GLOBAL_EXTRACT_CONCURRENCY, thread_name_prefix="extract")
 
 # ---------------------------------------------------------------- 日志
@@ -130,74 +130,6 @@ app = Flask(__name__, static_folder="app/static", static_url_path="/static")
 app.config["JSON_AS_ASCII"] = False
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024  # 请求体 512KB
 SERVICE_STARTED_AT = time.time()
-
-# ---------------------------------------------------------------- 失败负缓存
-
-# 同一 URL 提取失败后短期直接返回缓存结果，不再真实请求平台：
-# - 确定性错误（链接无效/凭证失效/缺 token/不支持的链接）缓存 10 分钟（重试无意义，需换新链接）
-# - 瞬时错误（触发验证/超时等）缓存 60 秒（可能稍后恢复，自动重试有机会成功）
-# - 前端手动「重试」传 force=true 绕过缓存，真实重新请求
-_FAIL_CACHE_TTL_DEFINITE = 600
-_FAIL_CACHE_TTL_TRANSIENT = 60
-_FAIL_CACHE_MAX = 500
-_TRANSIENT_KEYWORDS = ("触发验证", "请稍后重试", "未返回完整文案", "超时")
-_fail_cache: dict[str, tuple[float, str, str]] = {}  # url -> (expire_ts, error, hint)
-
-
-def _fail_cache_get(url: str):
-    """命中且未过期返回 (error, hint)，否则返回 None（顺带清理过期项）。"""
-    entry = _fail_cache.get(url)
-    if not entry:
-        return None
-    expire_ts, error, hint = entry
-    if time.time() < expire_ts:
-        return error, hint
-    _fail_cache.pop(url, None)
-    return None
-
-
-def _fail_cache_put(url: str, error: str, hint: str) -> None:
-    ttl = _FAIL_CACHE_TTL_TRANSIENT if any(k in error for k in _TRANSIENT_KEYWORDS) else _FAIL_CACHE_TTL_DEFINITE
-    _fail_cache[url] = (time.time() + ttl, error, hint)
-    # 防内存膨胀：先清过期，仍超限则淘汰最旧一半
-    if len(_fail_cache) > _FAIL_CACHE_MAX:
-        now = time.time()
-        for k, (expire_ts, _, _) in list(_fail_cache.items()):
-            if expire_ts <= now:
-                _fail_cache.pop(k, None)
-        if len(_fail_cache) > _FAIL_CACHE_MAX:
-            for k in sorted(_fail_cache, key=lambda u: _fail_cache[u][0])[: len(_fail_cache) // 2]:
-                _fail_cache.pop(k, None)
-
-
-# ---------------------------------------------------------------- 同 URL 请求冷却
-
-# 防止同一链接被疯狂重试：无论成败，同一 URL 在冷却期内只允许一次真实平台请求。
-# - 失败负缓存只拦「失败」链接；用户点「重试」传 force=true 绕过缓存后仍可能反复打平台
-# - 冷却独立于 force，冷却期内任何重试直接返回友好提示，不产生平台请求
-_URL_COOLDOWN_SECONDS = float(os.environ.get("URL_COOLDOWN_SECONDS", "30"))
-_url_cooldown: dict[str, float] = {}  # url -> 下次允许真实请求的时间戳
-_url_cooldown_lock = threading.Lock()
-
-
-def _url_cooldown_check(url: str) -> float:
-    """返回剩余冷却秒数（0 = 允许真实请求）；冷却期内拒绝并顺带清理过期项。
-
-    调用方可用返回值生成友好提示（如「请 X 秒后再试」），并把剩余秒数透传给前端，
-    让前端倒计时与后端冷却保持一致，避免「前端说可重试、后端仍拦截」的口径割裂。
-    """
-    now = time.time()
-    with _url_cooldown_lock:
-        allowed_at = _url_cooldown.get(url, 0.0)
-        if now < allowed_at:
-            return allowed_at - now
-        _url_cooldown[url] = now + _URL_COOLDOWN_SECONDS
-        if len(_url_cooldown) > 2000:  # 防内存膨胀：清理过期项
-            for k, v in list(_url_cooldown.items()):
-                if v <= now:
-                    _url_cooldown.pop(k, None)
-        return 0.0
-
 
 # ---------------------------------------------------------------- 请求日志
 
@@ -332,7 +264,7 @@ def _init_db():
                  "WHEN error LIKE '%不支持%' OR error LIKE '%xsec_token%' OR error LIKE '%作品 ID%' THEN 'invalid_input' "
                  "WHEN error LIKE '%失效%' OR error LIKE '%不存在%' THEN 'expired_content' "
                  "WHEN error LIKE '%风控%' OR error LIKE '%HTML%' OR error LIKE '%JSON%' OR error LIKE '%请求%' THEN 'upstream_error' "
-                 "ELSE 'internal_error' END WHERE status NOT IN ('success', 'blocked') AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
+                 "ELSE 'internal_error' END WHERE status != 'success' AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
     conn.execute("CREATE TABLE IF NOT EXISTS extract_cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_extract_cache_expiry ON extract_cache(expires_at)")
     conn.execute("CREATE TABLE IF NOT EXISTS admin_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, message TEXT NOT NULL, value REAL DEFAULT 0, created_at TEXT NOT NULL)")
@@ -511,6 +443,52 @@ def api_health():
     return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat(), "uptime_seconds": round(time.time() - SERVICE_STARTED_AT)})
 
 
+@app.route("/api/like", methods=["POST"])
+def api_like():
+    """单链接真实点赞查询（标准 JSON，供自动化流程/飞书工作流调用）。
+
+    与 /api/extract 的 NDJSON 流式不同，本接口固定返回标准 JSON，
+    只提取 like_count 等核心字段，便于下游系统直接解析。
+    请求体：{"url": "https://..."}，支持传入单个链接或混合文本。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    # 无有效设备签名时跳过设备限速（防伪造设备每次换新绕过），仅靠 IP 限速兜底
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("url", "") or data.get("urls", "") or ""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    raw = str(raw).strip()
+    if not raw:
+        return jsonify({"success": False, "error": "请提供视频链接"}), 400
+
+    started_at = time.monotonic()
+    result = extract_link(raw)
+    if not result.success:
+        return jsonify({
+            "success": False,
+            "platform": result.platform_raw or "",
+            "error": result.error or "提取失败",
+            "hint": result.hint or "",
+            "fetch_ms": round((time.monotonic() - started_at) * 1000),
+        }), 200
+
+    return jsonify({
+        "success": True,
+        "like_count": result.like_count,
+        "platform": result.platform,
+        "platform_raw": result.platform_raw,
+        "post_id": result.post_id,
+        "canonical_url": result.canonical_url,
+        "author_name": result.author_name,
+        "publish_time": result.publish_time,
+        "fetch_ms": round((time.monotonic() - started_at) * 1000),
+    })
+
+
 @app.route("/api/extract", methods=["POST"])
 def api_extract():
     ip = request.remote_addr or "127.0.0.1"
@@ -521,7 +499,6 @@ def api_extract():
 
     data = request.get_json(silent=True) or {}
     raw = data.get("urls", "")
-    force = bool(data.get("force", False))  # 手动重试时强制绕过失败负缓存
     # 压测/诊断可显式关闭历史落库，避免把公开样本混入用户转换记录。
     # 未传该字段时仍按原行为保存，保持现有前端和统计逻辑不变。
     record_history = data.get("record_history") is not False
@@ -570,7 +547,7 @@ def api_extract():
                     device_id, item["original_url"], item["canonical_url"], item["platform"],
                     item["title"], item["caption"], item["author_name"], item["publish_time"],
                     item["like_count"], item["video_url"], item["cover_url"],
-                    item.get("status") or ("success" if item["success"] else "error"),
+                    "success" if item["success"] else "error",
                     item["error"] if not item["success"] else "",
                     item["duration_ms"], int(item["cache_hit"]), item["outcome_class"],
                     int((item.get("telemetry") or {}).get("retry_count") or 0),
@@ -587,55 +564,6 @@ def api_extract():
         """提取单条链接（带随机抖动，避免节奏规律触发风控）。"""
         started_at = time.monotonic()
         time.sleep(random.uniform(0, 0.5))
-
-        # 失败负缓存：同一 URL 短期内失败过 → 直接返回缓存结果，不再真实请求平台
-        # （防无效链接反复重试：既省平台请求、又降低风控触发概率）
-        if not force:
-            cached = _fail_cache_get(url)
-            if cached:
-                cached_error, cached_hint = cached
-                log.info("失败缓存命中，跳过平台请求: %s (%s)", url[:60], cached_error)
-                item = {
-                    "original_url": url,
-                    "success": False,
-                    "platform": "", "platform_raw": "",
-                    "title": "", "caption": "", "author_name": "",
-                    "publish_time": "", "like_count": 0,
-                    "video_url": "", "canonical_url": "", "cover_url": "",
-                    "post_id": "", "error": cached_error, "hint": cached_hint,
-                    "partial": False, "cache_hit": False, "telemetry": None,
-                    "cached_fail": True,
-                    "duration_ms": round((time.monotonic() - started_at) * 1000),
-                    "status": "blocked", "outcome_class": "blocked_cache",
-                }
-                if record_history:
-                    _save_to_db(item)
-                return item
-
-        # 同 URL 冷却：冷却期内拒绝真实请求（防同一链接疯狂重试；独立于 force，
-        # force 只绕过失败缓存，仍受冷却约束）
-        cooldown_left = _url_cooldown_check(url)
-        if cooldown_left > 0:
-            log.info("同 URL 冷却拦截: %s (%ds)", url[:60], int(cooldown_left) + 1)
-            item = {
-                "original_url": url,
-                "success": False,
-                "platform": "", "platform_raw": "",
-                "title": "", "caption": "", "author_name": "",
-                "publish_time": "", "like_count": 0,
-                "video_url": "", "canonical_url": "", "cover_url": "",
-                "post_id": "",
-                "error": f"该链接请求过于频繁，请 {int(cooldown_left) + 1} 秒后再试",
-                "hint": "同一链接短时间内只能提取一次，避免触发平台风控",
-                "partial": False, "cache_hit": False, "telemetry": None,
-                "cooldown": True, "cooldown_remaining": int(cooldown_left) + 1,
-                "duration_ms": round((time.monotonic() - started_at) * 1000),
-                "status": "blocked", "outcome_class": "blocked_cooldown",
-            }
-            if record_history:
-                _save_to_db(item)
-            return item
-
         result = extract_link(url)
         item = {
             "original_url": url,
@@ -670,8 +598,6 @@ def api_extract():
                      result.author_name or "-", result.like_count, elapsed_ms)
         else:
             log.warning("提取失败 [%s] 错误:%s (耗时:%.0fms)", url[:60], result.error, elapsed_ms)
-            # 写入失败负缓存（同 URL 短期重试直接命中，不再打平台）
-            _fail_cache_put(url, result.error, result.hint)
         if record_history:
             _save_to_db(item)
         return item
@@ -687,7 +613,8 @@ def api_extract():
         success_count = 0
         url_iter = iter(enumerate(urls))
         futures = {}
-        for _ in range(min(EXTRACT_CONCURRENCY, len(urls))):
+        batch_concurrency = _effective_extract_concurrency()
+        for _ in range(min(batch_concurrency, len(urls))):
             source_index, url = next(url_iter)
             futures[_extract_queue.submit(_process_one, url)] = (source_index, url)
         while futures:
@@ -735,7 +662,7 @@ def api_extract():
                 pass
         log.info(
             "批量提取完成: total=%d success=%d concurrency=%d elapsed=%.0fms",
-            len(urls), success_count, EXTRACT_CONCURRENCY,
+            len(urls), success_count, batch_concurrency,
             (time.monotonic() - batch_started_at) * 1000,
         )
         yield json.dumps({"type": "end", "done": done}, ensure_ascii=False) + "\n"
@@ -834,70 +761,6 @@ def api_stats():
     return jsonify(resp)
 
 
-@app.route("/api/notice", methods=["GET"])
-def api_notice():
-    """高峰/风控风险提示：实时计算全局近 5 分钟请求频率与失败率，返回风险等级。
-
-    - normal：一切正常（前端隐藏提示条）
-    - busy：请求量偏高（月底高峰多人同时使用），提示用户如遇失败稍后再试
-    - risk：失败率异常升高（疑似平台风控/限流），提示用户暂停操作、避免连续重试
-    判定基于全局 history（不按设备隔离，因为高峰/风控是全局现象），带轻量限速。
-    """
-    ip = request.remote_addr or "127.0.0.1"
-    if not _check_rate_limit(f"notice:{ip}", 30):
-        # 限速兜底：公告是静态低频数据，即使命中限速也应返回，避免用户错过公告
-        return jsonify({
-            "success": True,
-            "level": "normal",
-            "message": "",
-            "announcement": ANNOUNCEMENT,
-            "announcement_id": _ANNOUNCEMENT_ID,
-        }), 200
-
-    conn = _get_db()
-    try:
-        since = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-        # 排除 blocked 记录（失败缓存命中/冷却拦截是主动防护，不是平台真实失败，
-        # 若计入失败率会误报风控风险）
-        row = conn.execute(
-            """
-            SELECT COUNT(*) total,
-                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok
-            FROM history WHERE created_at >= ? AND status != 'blocked'
-            """,
-            (since,),
-        ).fetchone()
-        total = row["total"] or 0
-        ok = row["ok"] or 0
-        fail = total - ok
-        fail_rate = round(fail / total * 100, 1) if total else 0.0
-
-        # 风险等级判定（阈值按单服务 2 worker 的承载能力估算）
-        level, message = "normal", ""
-        if total >= 40 and fail_rate >= 50:
-            level = "risk"
-            message = "检测到平台访问受限，为避免触发风控，建议暂停 1 分钟再操作，或从 App 复制最新分享链接。"
-        elif total >= 40:
-            level = "busy"
-            message = "当前使用高峰，平台可能限流，如遇失败建议稍后再试。"
-        elif fail_rate >= 40 and total >= 10:
-            level = "risk"
-            message = "检测到提取失败率偏高，为避免触发风控，请间隔几秒再重试，或从 App 复制最新分享链接。"
-    finally:
-        conn.close()
-
-    return jsonify({
-        "success": True,
-        "level": level,
-        "message": message,
-        "announcement": ANNOUNCEMENT,
-        "announcement_id": _ANNOUNCEMENT_ID,
-        "window": "5m",
-        "total": total,
-        "fail_rate": fail_rate,
-    })
-
-
 # ---------------------------------------------------------------- 后台运营看板（管理员）
 
 def _admin_require_rate(ip: str) -> bool:
@@ -974,9 +837,7 @@ def api_admin_overview():
 
     window, days, since = _admin_window()
     conn = _get_db()
-    # 拦截记录（失败缓存命中/冷却拦截）用 status='blocked' 落库，属主动防护而非平台真实结果，
-    # 所有成功率/失败率/活跃设备统计统一排除，避免虚低成功率或误报风控；拦截量单独统计展示。
-    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)).fetchone()["c"]
+    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
     ok_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status = 'success'", (since,)).fetchone()["c"]
     fail_count = total - ok_count
     user_error_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input', 'expired_content')", (since,)).fetchone()["c"]
@@ -984,35 +845,24 @@ def api_admin_overview():
     valid_total = total - user_error_count
     service_success_rate = round(ok_count / valid_total * 100, 1) if valid_total else 0
     input_validity_rate = round(valid_total / total * 100, 1) if total else 0
-    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)).fetchone()["c"]
+    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
 
     today_str = datetime.now().strftime("%Y-%m-%d")
-    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND status != 'blocked'", (today_str + "%",)).fetchone()["c"]
-    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
-    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
-
-    # ---- 防护拦截统计：失败缓存命中 / 冷却拦截（主动防护体系的工作量证明）----
-    blocked_cache_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'blocked_cache'", (since,)).fetchone()["c"] or 0
-    blocked_cooldown_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'blocked_cooldown'", (since,)).fetchone()["c"] or 0
-    blocked_total = blocked_cache_count + blocked_cooldown_count
+    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (today_str + "%",)).fetchone()["c"]
+    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
+    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
 
     platform_rows = conn.execute(
-        "SELECT CASE "
-        "WHEN platform IN ('抖音', 'douyin') THEN 'douyin' "
-        "WHEN platform IN ('小红书', 'xiaohongshu') THEN 'xiaohongshu' "
-        "ELSE platform END AS norm_platform, COUNT(*) c FROM history "
-        "WHERE created_at >= ? AND outcome_class = 'success' GROUP BY norm_platform", (since,)
+        "SELECT platform, COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' GROUP BY platform", (since,)
     ).fetchall()
     platform_dist = {}
     for row in platform_rows:
-        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["norm_platform"], row["norm_platform"] or "未知")
+        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
         platform_dist[name] = platform_dist.get(name, 0) + row["c"]
 
     platform_health = {}
     health_rows = conn.execute(
         "SELECT CASE "
-        "WHEN platform IN ('抖音', 'douyin') THEN 'douyin' "
-        "WHEN platform IN ('小红书', 'xiaohongshu') THEN 'xiaohongshu' "
         "WHEN platform != '' THEN platform "
         "WHEN lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%' THEN 'douyin' "
         "WHEN lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%' THEN 'xiaohongshu' "
@@ -1020,7 +870,7 @@ def api_admin_overview():
         "SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok, "
         "SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content') THEN 1 ELSE 0 END) user_errors, "
         "SUM(CASE WHEN outcome_class IN ('upstream_error','internal_error') THEN 1 ELSE 0 END) service_failures "
-        "FROM history WHERE created_at >= ? AND status != 'blocked' GROUP BY resolved_platform", (since,)
+        "FROM history WHERE created_at >= ? GROUP BY resolved_platform", (since,)
     ).fetchall()
     for row in health_rows:
         name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["resolved_platform"], row["resolved_platform"] or "未知")
@@ -1038,80 +888,24 @@ def api_admin_overview():
             "service_failures": row["service_failures"] or 0,
         }
 
-    # ---- 风控风险判定：平台失败率 + 疑似风控错误聚类 ----
-    risk = {"level": "ok", "title": "", "detail": "", "platforms": {}, "suspect_count": 0}
-    suspect_count = conn.execute(
-        """
-        SELECT COUNT(*) c FROM history WHERE created_at >= ?
-          AND outcome_class IN ('upstream_error', 'internal_error')
-          AND (lower(error) LIKE '%风控%' OR lower(error) LIKE '%限制访问%'
-               OR lower(error) LIKE '%验证%' OR lower(error) LIKE '%captcha%'
-               OR lower(error) LIKE '%challenge%' OR lower(error) LIKE '%暂时%')
-        """, (since,)
-    ).fetchone()["c"] or 0
-    risk["suspect_count"] = suspect_count
-    for name, h in platform_health.items():
-        if h["total"] < 5:  # 样本过少不判定
-            continue
-        plat_total = h["total"]
-        # 仅以服务失败占比判定（排除用户输入错误如乱粘链接/无效作品，避免把
-        # 「未知平台全是 invalid_input」误报为风控）；上游/内部错误才是风控信号。
-        svc_fail_rate = h["service_failures"] / plat_total * 100 if plat_total else 0
-        entry = {
-            "fail_rate": round(h["fail"] / plat_total * 100, 1) if plat_total else 0,
-            "service_failures": h["service_failures"],
-            "total": plat_total,
-        }
-        if svc_fail_rate >= 30:
-            risk["level"] = "risk"
-            risk["platforms"][name] = entry
-        elif svc_fail_rate >= 15:
-            if risk["level"] == "ok":
-                risk["level"] = "warn"
-            risk["platforms"][name] = entry
-    if risk["level"] != "ok" or suspect_count >= 10:
-        if risk["level"] == "ok":
-            risk["level"] = "warn"
-        names = "、".join(risk["platforms"]) or "平台"
-        risk["title"] = "平台风控或上游异常" if risk["level"] == "risk" else "平台波动预警"
-        risk["detail"] = f"近{window}内 {names} 失败率偏高（疑似风控/上游异常 {suspect_count} 条），建议关注服务器 IP 状态与平台策略。"
-    elif suspect_count >= 3:
-        risk["level"] = "warn"
-        risk["title"] = "疑似风控信号"
-        risk["detail"] = f"近{window}内检测到 {suspect_count} 条疑似风控错误，请关注平台状态。"
-
-    # ---- 趋势（含平台分线，一次分组查询）----
     trend = []
     today = datetime.now()
     points = 1 if days == 1 else days
-    day_rows = conn.execute(
-        """
-        SELECT substr(created_at, 1, 10) day,
-               COUNT(*) cnt,
-               SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok,
-               SUM(CASE WHEN platform IN ('douyin', '抖音')
-                     OR (platform = '' AND (lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%'))
-                   THEN 1 ELSE 0 END) dy,
-               SUM(CASE WHEN platform IN ('xiaohongshu', '小红书')
-                     OR (platform = '' AND (lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%'))
-                   THEN 1 ELSE 0 END) xhs
-        FROM history WHERE created_at >= ? AND status != 'blocked'
-        GROUP BY day
-        """, (since,)
-    ).fetchall()
-    day_map = {r["day"]: r for r in day_rows}
     for i in range(points - 1, -1, -1):
         day = today - timedelta(days=i)
-        r = day_map.get(day.strftime("%Y-%m-%d"))
-        cnt = r["cnt"] if r else 0
-        ok_cnt = r["ok"] if r else 0
+        day_str = day.strftime("%Y-%m-%d")
+        cnt = conn.execute(
+            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ?", (day_str + "%", since)
+        ).fetchone()["c"]
+        ok_cnt = conn.execute(
+        "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ? AND outcome_class = 'success'",
+            (day_str + "%", since),
+        ).fetchone()["c"]
         trend.append({
             "date": day.strftime("%m-%d"),
             "count": cnt,
             "ok": ok_cnt,
             "fail": cnt - ok_cnt,
-            "douyin": r["dy"] if r else 0,
-            "xiaohongshu": r["xhs"] if r else 0,
         })
     conn.close()
 
@@ -1126,16 +920,12 @@ def api_admin_overview():
         "input_validity_rate": input_validity_rate,
         "user_error_count": user_error_count,
         "service_failure_count": service_failure_count,
-        "blocked_total": blocked_total,
-        "blocked_cache": blocked_cache_count,
-        "blocked_cooldown": blocked_cooldown_count,
         "active_devices": active_devices,
         "active_devices_7d": active_7d,
         "active_devices_30d": active_30d,
         "today_count": today_count,
         "platform_dist": platform_dist,
         "platform_health": platform_health,
-        "risk": risk,
         "trend": trend,
     })
 
@@ -1155,7 +945,7 @@ def api_admin_devices():
         limit, offset = 50, 0
     conn = _get_db()
     total_devices = conn.execute(
-        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)
+        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)
     ).fetchone()["c"]
     rows = conn.execute(
         """
@@ -1165,7 +955,7 @@ def api_admin_devices():
                MIN(created_at) AS first_at,
                MAX(created_at) AS last_at
         FROM history
-        WHERE created_at >= ? AND status != 'blocked'
+        WHERE created_at >= ?
         GROUP BY device_id
         ORDER BY total DESC
         LIMIT ? OFFSET ?
@@ -1208,58 +998,13 @@ def api_admin_errors():
     rows = conn.execute(
         """
         SELECT error, COUNT(*) c FROM history
-        WHERE created_at >= ? AND status NOT IN ('success', 'blocked') AND error != ''
+        WHERE created_at >= ? AND status != 'success' AND error != ''
         GROUP BY error ORDER BY c DESC LIMIT 30
         """, (since,)
     ).fetchall()
     conn.close()
     errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
     return jsonify({"success": True, "range": window, "errors": errors})
-
-
-@app.route("/api/admin/retry_hot", methods=["GET"])
-def api_admin_retry_hot():
-    """重试热点：同一链接被高频提交 TOP 20（URL 中段脱敏，不含分享凭证）。"""
-    ip = request.remote_addr or "127.0.0.1"
-    if not _admin_require_rate(ip):
-        return jsonify({"success": False, "error": "请求过于频繁"}), 429
-
-    window, _, since = _admin_window()
-    conn = _get_db()
-    rows = conn.execute(
-        """
-        SELECT original_url,
-               COUNT(*) c,
-               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok,
-               MAX(created_at) last_at
-        FROM history
-        WHERE created_at >= ? AND original_url != ''
-        GROUP BY original_url
-        ORDER BY c DESC LIMIT 20
-        """, (since,)
-    ).fetchall()
-    conn.close()
-
-    def _mask_url(url: str) -> str:
-        url = (url or "").strip()
-        if len(url) <= 60:
-            return url
-        return url[:30] + "..." + url[-20:]
-
-    items = []
-    for r in rows:
-        url = r["original_url"]
-        plat = "抖音" if ("douyin" in url or "iesdouyin" in url) else (
-            "小红书" if ("xiaohongshu" in url or "xhslink" in url) else "其他")
-        items.append({
-            "url": _mask_url(url),
-            "platform": plat,
-            "count": r["c"],
-            "ok": r["ok"] or 0,
-            "fail": r["c"] - (r["ok"] or 0),
-            "last_at": r["last_at"],
-        })
-    return jsonify({"success": True, "range": window, "items": items})
 
 
 @app.route("/api/admin/performance", methods=["GET"])
@@ -1271,16 +1016,16 @@ def api_admin_performance():
     window, _, since = _admin_window()
     conn = _get_db()
     row = conn.execute(
-        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)
+        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ?", (since,)
     ).fetchone()
     durations = [r["duration_ms"] for r in conn.execute(
-        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 AND status != 'blocked' ORDER BY duration_ms", (since,)
+        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 ORDER BY duration_ms", (since,)
     ).fetchall()]
     total = row["total"] or 0
     hits = row["cache_hits"] or 0
     p95 = durations[max(0, (len(durations) * 95 + 99) // 100 - 1)] if durations else 0
-    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' AND status != 'blocked'", (since,)).fetchone()["c"]
-    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content') AND status != 'blocked'", (since,)).fetchone()["c"]
+    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success'", (since,)).fetchone()["c"]
+    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content')", (since,)).fetchone()["c"]
     valid_total = total - user_errors
     service_failures = valid_total - current_ok
     retry_rows = conn.execute(
