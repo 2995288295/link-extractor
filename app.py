@@ -1070,6 +1070,26 @@ def api_admin_performance():
     })
 
 
+@app.route("/api/admin/retry_hot", methods=["GET"])
+def api_admin_retry_hot():
+    """返回窗口内重复提交较多的链接，供运营看板定位重试热点。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    _window, _days, since = _admin_window()
+    conn = _get_db()
+    rows = conn.execute(
+        """SELECT original_url AS url, MAX(platform) AS platform, COUNT(*) AS count,
+                  SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS ok,
+                  SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS fail,
+                  MAX(created_at) AS last_at
+           FROM history WHERE created_at >= ? GROUP BY original_url
+           HAVING COUNT(*) > 1 ORDER BY count DESC, last_at DESC LIMIT 50""",
+        (since,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"success": True, "items": [dict(row) for row in rows]})
+
 @app.route("/api/admin/recent", methods=["GET"])
 def api_admin_recent():
     """最近动态（脱敏）：仅平台/状态/时间/错误摘要，不返回任何 URL 与文案。"""
