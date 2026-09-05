@@ -41,98 +41,6 @@ header { text-align: center; padding: 30px 0 22px; }
 header h1 { font-size: 27px; font-weight: 750; letter-spacing: -.04em; margin-top: 4px; }
 header p { color: var(--text2); font-size: 14px; margin: 7px auto 0; max-width: 560px; }
 
-/* 高峰/风控风险提示条 */
-.risk-banner {
-  display: none;
-  align-items: flex-start;
-  gap: 10px;
-  background: #fff8e6;
-  border: 1px solid #f0d48a;
-  border-radius: 10px;
-  padding: 11px 14px;
-  margin-bottom: 16px;
-  color: #7a5a10;
-  font-size: 13.5px;
-  line-height: 1.55;
-}
-.risk-banner.visible { display: flex; }
-.risk-banner .banner-icon { font-size: 16px; line-height: 1.4; }
-.risk-banner .banner-close {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: #a8863a;
-  font-size: 15px;
-  cursor: pointer;
-  padding: 0 2px;
-  line-height: 1.3;
-  flex-shrink: 0;
-}
-.risk-banner .banner-close:hover { color: #6b4d0d; }
-
-/* 运营公告弹窗：服务端配置公告时触发，关闭后 7 天内不再弹 */
-.announce-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(22, 38, 59, .45);
-  z-index: 1000;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-.announce-overlay.visible { display: flex; }
-.announce-modal {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  box-shadow: 0 18px 50px rgba(22, 38, 59, .28);
-  width: 100%;
-  max-width: 460px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: announce-in .22s ease-out;
-}
-@keyframes announce-in {
-  from { transform: translateY(12px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-.announce-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 16px 20px 12px;
-  border-bottom: 1px solid rgba(219, 227, 238, .7);
-}
-.announce-head .announce-icon { font-size: 20px; line-height: 1; }
-.announce-head .announce-title { font-size: 16px; font-weight: 700; color: var(--text); }
-.announce-close {
-  margin-left: auto;
-  background: none;
-  border: none;
-  font-size: 18px;
-  color: var(--text2);
-  cursor: pointer;
-  line-height: 1;
-  padding: 4px;
-}
-.announce-close:hover { color: var(--text); }
-.announce-body {
-  padding: 16px 20px;
-  font-size: 14px;
-  line-height: 1.75;
-  color: var(--text);
-  white-space: pre-line;
-  overflow-y: auto;
-}
-.announce-foot {
-  padding: 12px 20px 16px;
-  text-align: right;
-  border-top: 1px solid rgba(219, 227, 238, .5);
-}
-
 .card {
   background: var(--card);
   border: 1px solid rgba(219, 227, 238, .95);
@@ -352,6 +260,12 @@ textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23, 10
 
 footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 32px; }
 .footer-note { margin-bottom: 4px; }
+.disclaimer {
+  margin: 14px 0 0; padding: 10px 12px; border: 1px solid #f0d28a;
+  border-radius: 8px; background: #fff9e8; color: #765b16; font-size: 12px;
+  line-height: 1.65; text-align: left;
+}
+.disclaimer strong { color: #614700; }
 .footer-author { color: #9aa0a8; font-size: 11px; }
 
 .loading-spinner {
@@ -443,29 +357,6 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
     <p>粘贴抖音 / 小红书分享链接，批量提取转换链接与文案，逐条复制</p>
   </header>
 
-  <!-- 高峰/风控风险提示条：仅在有风险时显示，可手动关闭 -->
-  <div class="risk-banner" id="riskBanner" role="status" aria-live="polite">
-    <span class="banner-icon">⚠️</span>
-    <span class="banner-text" id="riskBannerText"></span>
-    <button class="banner-close" type="button" onclick="dismissRiskBanner()" aria-label="关闭提示">×</button>
-  </div>
-
-  <!-- 运营公告弹窗：服务端配置公告时触发，关闭后 7 天内不再弹 -->
-  <div class="announce-overlay" id="announceOverlay" role="dialog" aria-modal="true" aria-labelledby="announceTitle"
-       onclick="if(event.target===this)dismissAnnouncement()">
-    <div class="announce-modal">
-      <div class="announce-head">
-        <span class="announce-icon">📢</span>
-        <span class="announce-title" id="announceTitle">公告</span>
-        <button class="announce-close" type="button" onclick="dismissAnnouncement()" aria-label="关闭公告">×</button>
-      </div>
-      <div class="announce-body" id="announceText"></div>
-      <div class="announce-foot">
-        <button class="btn btn-primary" type="button" onclick="dismissAnnouncement()">我知道了</button>
-      </div>
-    </div>
-  </div>
-
   <div class="tab-bar" role="tablist" aria-label="功能导航">
     <button class="tab active" id="tab-button-extract" role="tab" aria-selected="true" aria-controls="tab-extract" data-tab="extract" onclick="switchTab('extract')" onkeydown="handleTabKey(event)">提取</button>
     <button class="tab" id="tab-button-stats" role="tab" aria-selected="false" aria-controls="tab-stats" data-tab="stats" onclick="switchTab('stats')" onkeydown="handleTabKey(event)">统计</button>
@@ -476,6 +367,7 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   <div id="tab-extract" role="tabpanel" aria-labelledby="tab-button-extract">
     <div class="card">
       <label class="input-label" for="inputUrls">输入链接</label>
+      <div class="disclaimer" role="note"><strong>使用提示：</strong>本工具仅用于链接整理和信息辅助提取，不保证结果 100% 准确、完整或持续有效。平台页面、分享链接和访问权限可能发生变化，请在使用提取结果前逐条核对链接、文案及其他信息。因使用本工具或未核对提取结果造成的任何后果，由使用者自行判断并承担。</div>
       <textarea id="inputUrls" placeholder="粘贴抖音/小红书分享链接，每行一个，也支持整段复制（自动识别其中的链接）&#10;&#10;粘贴后 1 秒自动开始提取" oninput="onInputChange()"></textarea>
       <div class="link-count" id="linkCount"></div>
       <div class="toolbar">
@@ -510,8 +402,8 @@ footer { text-align: center; color: var(--text2); font-size: 12px; margin-top: 3
   </div>
 
   <footer>
-    <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.6</div>
+    <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取 · 使用前请核对提取结果</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.0</div>
   </footer>
 </div>
 
@@ -696,36 +588,6 @@ function extractUrls(text) {
     .filter(u => u && !seen.has(u) && seen.add(u));
 }
 
-/** 检测残缺链接（作品 ID 明显短于标准长度，多为聊天工具截断）。正常返回空串。 */
-function findTruncatedLink(url) {
-  try {
-    const u = new URL(url);
-    const host = (u.hostname || "").toLowerCase();
-    const path = u.pathname || "";
-    if (host.includes("xiaohongshu.com")) {
-      const m = path.match(/\/(?:explore|discovery\/item)\/([0-9A-Za-z]+)/);
-      if (m && m[1].length < 20) {
-        return `小红书链接不完整（ID 仅 ${m[1].length} 位，标准 24 位），可能被截断，请从 App 重新复制`;
-      }
-    } else if (host.includes("douyin.com") || host.includes("iesdouyin.com")) {
-      const m = path.match(/\/(?:video|note|share\/(?:video|slides|note))\/(\d+)/);
-      if (m && m[1].length < 15) {
-        return `抖音链接不完整（ID 仅 ${m[1].length} 位，标准 19 位），可能被截断，请从 App 重新复制`;
-      }
-    }
-  } catch (e) { /* 非标准 URL 交给后端处理 */ }
-  return "";
-}
-
-/** 过滤掉残缺链接，返回 [正常链接数组, 残缺链接数] */
-function splitTruncatedLinks(urls) {
-  const good = [], bad = [];
-  for (const u of urls) {
-    if (findTruncatedLink(u)) bad.push(u); else good.push(u);
-  }
-  return [good, bad.length];
-}
-
 /** 实时统计输入框中的链接数 */
 function updateLinkCount() {
   const raw = document.getElementById("inputUrls").value;
@@ -792,9 +654,9 @@ function onInputChange() {
   }, 1000);
 }
 
-async function doExtract(isAuto = false, force = false) {
+async function doExtract(isAuto = false) {
   const raw = document.getElementById("inputUrls").value;
-  let urls = extractUrls(raw);
+  const urls = extractUrls(raw);
   if (!urls.length) {
     if (!isAuto) showToast("未识别到链接，请粘贴抖音或小红书分享链接");
     return;
@@ -802,16 +664,6 @@ async function doExtract(isAuto = false, force = false) {
   if (urls.length > 20) {
     if (!isAuto) showToast("一次最多 20 条链接，请分批提取");
     return;
-  }
-  // 残缺链接预检：作品 ID 明显短于标准长度（多为聊天工具截断），过滤并提示，不浪费平台请求
-  const [validUrls, truncatedCount] = splitTruncatedLinks(urls);
-  if (truncatedCount > 0) {
-    if (validUrls.length === 0) {
-      if (!isAuto) showToast("链接可能不完整（被聊天工具截断），请从 App 重新复制完整链接");
-      return;
-    }
-    urls = validUrls;
-    showToast(`已跳过 ${truncatedCount} 条不完整链接（作品 ID 过短，可能被截断）`);
   }
   if (extractingNow) return;
   extractingNow = true;
@@ -835,7 +687,7 @@ async function doExtract(isAuto = false, force = false) {
     let res = await fetch("/api/extract", {
       method: "POST",
       headers: buildHeaders(),
-      body: JSON.stringify({ urls, force }),
+      body: JSON.stringify({ urls }),
     });
     // 请求失败：直接抛出错误信息
     if (!res.ok) {
@@ -1008,7 +860,7 @@ function resultCardHtml(r, i) {
         <div class="field-label">错误信息</div>
         <div class="field-value" style="color:var(--error);">${esc(r.error)}</div>
       </div>
-      ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}${r.cached_fail ? '<br/><span style="color:var(--warning, #b8860b);">该链接近期已尝试失败，已跳过重复请求。请从 App 重新复制最新分享链接。</span>' : ''}${r.cooldown ? '<br/><span style="color:var(--warning, #b8860b);">为避免触发平台风控，请按上方倒计时稍后再试。</span>' : ''}</div></div>` : ""}
+      ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}</div></div>` : ""}
       <div class="copy-row" style="margin-top:12px;">
         <button class="btn btn-ghost" onclick="copyText(this.closest('.result-item').dataset.originalUrl, this)">📋 复制原链接</button>
         <button class="btn btn-ghost" onclick="retryLink(this, ${i})">🔄 重试这条</button>
@@ -1055,11 +907,11 @@ function unescapeHtml(s) {
 }
 
 /** 流式提取单条链接，返回结果对象（供重试用） */
-async function extractOneStream(url, force) {
+async function extractOneStream(url) {
   let res = await fetch("/api/extract", {
     method: "POST",
     headers: buildHeaders(),
-    body: JSON.stringify({ urls: [url], force: !!force }),
+    body: JSON.stringify({ urls: [url] }),
   });
   // 请求失败：直接抛出错误信息
   if (!res.ok) {
@@ -1096,57 +948,16 @@ async function extractOneStream(url, force) {
 }
 
 /** 重试单条失败链接：重新提取并替换该卡片 */
-// ================= 重试节流（防风控） =================
-// 单条重试与批量重试共享全局冷却：避免用户连续点重试对平台打出瞬时请求洪峰
-// 与后端 URL 冷却（_URL_COOLDOWN_SECONDS=30s）保持一致，避免前端提示可重试、后端仍拦截的口径割裂
-const RETRY_COOLDOWN_SECONDS = 30;
-let retryCooldownUntil = 0;
-
-/** 剩余冷却秒数（0 = 可重试） */
-function retryCooldownLeft() {
-  return Math.max(0, Math.ceil((retryCooldownUntil - Date.now()) / 1000));
-}
-
-/** 尝试发起重试：冷却中返回 false 并提示，否则启动冷却返回 true */
-function tryAcquireRetry() {
-  const left = retryCooldownLeft();
-  if (left > 0) {
-    showToast(`为避免触发平台风控，请 ${left} 秒后再试`);
-    return false;
-  }
-  retryCooldownUntil = Date.now() + RETRY_COOLDOWN_SECONDS * 1000;
-  return true;
-}
-
-/** 按钮进入冷却倒计时：置灰并每秒刷新剩余秒数，结束后恢复 */
-function armRetryCooldown(btn, oldText) {
-  btn.dataset.retryOldText = oldText;
-  btn.dataset.retryCooldownEnd = String(retryCooldownUntil);
-  btn.disabled = true;
-  const tick = () => {
-    const left = retryCooldownLeft();
-    if (left > 0) {
-      btn.textContent = `⏳ ${left}s 后可重试`;
-      setTimeout(tick, 1000);
-    } else {
-      btn.disabled = false;
-      btn.textContent = btn.dataset.retryOldText || oldText;
-    }
-  };
-  tick();
-}
-
 async function retryLink(btn, index) {
   const card = btn.closest(".result-item");
   const target = card && card.dataset.originalUrl;
   if (!target) { showToast("找不到原始链接，请重新粘贴"); return; }
-  if (!tryAcquireRetry()) return;  // 冷却中，阻止本次重试
 
   const oldText = btn.textContent;
   btn.disabled = true;
   btn.innerHTML = '<span class="loading-spinner"></span>重试中...';
   try {
-    const r = await extractOneStream(target, true);  // force=true：绕过失败缓存真实重试
+    const r = await extractOneStream(target);
     if (r && r.success) {
       showToast("重试成功！");
       // 用新结果替换整个卡片
@@ -1164,15 +975,13 @@ async function retryLink(btn, index) {
       }
     } else {
       showToast((r && r.error) || "重试失败");
-      // 后端返回了剩余冷却秒数 → 用它对齐前端倒计时（避免「前端可重试、后端仍拦截」）
-      if (r && r.cooldown_remaining) {
-        retryCooldownUntil = Date.now() + (Number(r.cooldown_remaining) || 30) * 1000;
-      }
-      armRetryCooldown(btn, oldText);  // 失败也进入冷却，防连续重试
+      btn.disabled = false;
+      btn.textContent = oldText;
     }
   } catch (e) {
     showToast("重试失败：" + (e.message || "网络错误"));
-    armRetryCooldown(btn, oldText);
+    btn.disabled = false;
+    btn.textContent = oldText;
   }
 }
 
@@ -1189,25 +998,12 @@ function renderSingleResult(r, index) {
 }
 
 async function retryFailedLinks() {
-  // 跳过 cached_fail：确定性失败（链接无效/凭证失效/残缺）10 分钟内重试无意义，
-  // 且 force 重试会绕过失败缓存真实打平台，应引导用户换链接而非盲目重试
-  const failed = latestResults.filter(r => !r.success && r.original_url && !r.cached_fail);
-  const skipped = latestResults.filter(r => !r.success && r.cached_fail);
-  if (extractingNow) return;
-  if (!failed.length) {
-    if (skipped.length) {
-      showToast(`${skipped.length} 条链接已被识别为无效/不完整（近期失败），请从 App 重新复制后再试`);
-    }
-    return;
-  }
-  if (!tryAcquireRetry()) return;  // 冷却中，阻止本次批量重试
-  const btn = document.getElementById("btnRetryFailed");
-  const oldText = btn.textContent;
+  const failed = latestResults.filter(r => !r.success && r.original_url);
+  if (!failed.length || extractingNow) return;
   document.getElementById("inputUrls").value = failed.map(r => r.original_url).join("\n");
   updateLinkCount();
-  showToast(skipped.length ? `重试 ${failed.length} 条失败链接（已跳过 ${skipped.length} 条无效/不完整链接）` : `正在重试 ${failed.length} 条失败链接`);
-  await doExtract(false, true);  // force=true：绕过失败缓存真实重试
-  armRetryCooldown(btn, oldText);  // 批量重试后也进入冷却
+  showToast(`正在重试 ${failed.length} 条失败链接`);
+  await doExtract();
 }
 
 /** 重新编号所有结果卡片索引 */
@@ -1379,83 +1175,7 @@ async function clearHistory() {
 // 口令模块已隐藏（服务端未启用 ACCESS_TOKEN 时不校验），打开即用
 window.addEventListener("load", function () {
   // 预留：若以后恢复访问口令，可在此调用 apiFetch("/api/history") 验证
-  initRiskBanner();
 });
-
-// ================= 高峰/风控风险提示 =================
-let riskBannerDismissedUntil = 0;  // 用户手动关闭后 5 分钟内不再打扰
-
-async function pollRiskNotice() {
-  try {
-    const res = await fetch("/api/notice", { headers: buildHeaders() });
-    if (!res.ok) return;
-    const d = await res.json();
-    if (!d || !d.success) return;
-    // 运营公告：有配置才弹，关闭后 7 天内不再弹
-    if (d.announcement) {
-      showAnnouncement(d.announcement, d.announcement_id || "");
-    }
-    const banner = document.getElementById("riskBanner");
-    const text = document.getElementById("riskBannerText");
-    if (d.level === "busy" || d.level === "risk") {
-      if (Date.now() < riskBannerDismissedUntil) return;  // 用户刚关闭，静默
-      text.textContent = d.message || "当前平台访问压力较大，如遇失败请稍后再试。";
-      banner.classList.add("visible");
-    } else {
-      banner.classList.remove("visible");
-    }
-  } catch (e) { /* 网络波动忽略，下次轮询再试 */ }
-}
-
-// ================= 运营公告弹窗 =================
-let announcementShownThisSession = false;  // 本会话只弹一次，避免轮询中重复弹出
-
-function simpleHash(str) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
-  return (h >>> 0).toString(36);
-}
-
-function showAnnouncement(text, id) {
-  if (!text || announcementShownThisSession) return;
-  const realId = id || simpleHash(text);  // 无 ID 时按内容哈希：内容变更视为新公告
-  try {
-    const seen = localStorage.getItem("announcement_seen_" + realId);
-    if (seen) {
-      const ts = parseInt(seen, 10) || 0;
-      if (Date.now() - ts < 7 * 24 * 3600 * 1000) return;  // 7 天内已读，不再打扰
-    }
-  } catch (e) { /* 隐私模式等异常：照常弹窗 */ }
-  announcementShownThisSession = true;
-  const overlay = document.getElementById("announceOverlay");
-  overlay.dataset.announceId = realId;
-  document.getElementById("announceText").textContent = text;
-  overlay.classList.add("visible");
-}
-
-function dismissAnnouncement() {
-  const overlay = document.getElementById("announceOverlay");
-  overlay.classList.remove("visible");
-  const id = overlay.dataset.announceId || "";
-  try {
-    localStorage.setItem("announcement_seen_" + id, String(Date.now()));
-  } catch (e) { /* 忽略 */ }
-}
-
-// Esc 键也可关闭公告
-document.addEventListener("keydown", function (e) {
-  if (e.key === "Escape") dismissAnnouncement();
-});
-
-function dismissRiskBanner() {
-  document.getElementById("riskBanner").classList.remove("visible");
-  riskBannerDismissedUntil = Date.now() + 5 * 60 * 1000;  // 5 分钟不再显示
-}
-
-function initRiskBanner() {
-  pollRiskNotice();                                  // 进页立即查一次
-  setInterval(pollRiskNotice, 60 * 1000);            // 之后每 60 秒轮询
-}
 </script>
 </body>
 </html>
