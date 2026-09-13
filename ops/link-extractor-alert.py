@@ -169,6 +169,26 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
 
     try:
         conn.row_factory = sqlite3.Row
+        # 「平台限流」计数优先用细粒度归因列 error_kind（谁抛错谁归因，改文案不会失效）；
+        # 该列上线前的历史行 error_kind 为空，回退到旧的文案匹配，两者都不漏。
+        # 列不存在时（脚本先于 app.py 迁移上线）整段退回旧口径，避免巡检直接报错。
+        has_error_kind = "error_kind" in {r[1] for r in conn.execute("PRAGMA table_info(history)")}
+        limited_where = (
+            "(error_kind IN ('platform_limited','short_link_blocked')"
+            " OR (error_kind = '' AND error LIKE '%平台暂时限制%'))"
+            if has_error_kind else "error LIKE '%平台暂时限制%'"
+        )
+        limited_expr = "CASE WHEN {} THEN 1 ELSE 0 END".format(limited_where)
+        # 「被打回登录页的请求发生在短链解析阶段」的占比 —— 这决定了处置动作：
+        # 短链阶段是失败最集中的地方，也是 2026-09-13 才补上换 IP 盲区的位置。
+        short_where = (
+            "(error_kind = 'short_link_blocked'"
+            " OR (error_kind = '' AND error LIKE '%平台暂时限制%'"
+            "     AND lower(original_url) LIKE '%xhslink%'))"
+            if has_error_kind else
+            "(error LIKE '%平台暂时限制%' AND lower(original_url) LIKE '%xhslink%')"
+        )
+        short_expr = "CASE WHEN {} THEN 1 ELSE 0 END".format(short_where)
         row = conn.execute(
             """
             SELECT COUNT(*) AS total,
@@ -213,10 +233,11 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
                    SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) AS ok,
                    SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content')
                             THEN 1 ELSE 0 END) AS user_errors,
-                   SUM(CASE WHEN error LIKE '%平台暂时限制%' THEN 1 ELSE 0 END) AS limited
+                   SUM({limited}) AS limited,
+                   SUM({short}) AS limited_short
             FROM history WHERE created_at >= ?
             GROUP BY rp
-            """,
+            """.format(limited=limited_expr, short=short_expr),
             (threshold_ts,),
         ).fetchall():
             if not r["rp"]:
@@ -228,12 +249,13 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
                 "ok": p_ok,
                 "valid_total": p_valid,
                 "limited": r["limited"] or 0,
+                "limited_short": r["limited_short"] or 0,
                 "service_success_rate": round(p_ok / p_valid * 100, 1) if p_valid else 100.0,
             }
 
         # 全局「平台暂时限制」计数：独立统计，不依赖平台识别是否成功
         stats["limited_total"] = conn.execute(
-            "SELECT COUNT(*) AS c FROM history WHERE created_at >= ? AND error LIKE '%平台暂时限制%'",
+            "SELECT COUNT(*) AS c FROM history WHERE created_at >= ? AND " + limited_where,
             (threshold_ts,),
         ).fetchone()["c"] or 0
 
@@ -341,6 +363,7 @@ def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict
                 "orange",
                 [
                     ("{}".format(since_label), "「平台暂时限制」{} 次".format(p["limited"])),
+                    ("其中短链阶段", "{} 次（请求在 xhslink 解析时就被打回，换出口 IP 可解）".format(p["limited_short"])),
                     ("该平台成功率", "{}%（{} 样本）".format(p["service_success_rate"], p["valid_total"])),
                     ("含义", "平台把请求 302 到登录页，属窗口式软限流"),
                 ],

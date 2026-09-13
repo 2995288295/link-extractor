@@ -37,7 +37,7 @@ from urllib.parse import urlparse as _urlparse
 import requests as _requests
 from flask import Flask, Response, jsonify, make_response, request, send_from_directory
 
-from lib.extractor import extract_link
+from lib.extractor import ERROR_KIND_TO_OUTCOME, extract_link
 
 # ---------------------------------------------------------------- 安全配置
 
@@ -254,6 +254,12 @@ def _init_db():
         conn.execute("ALTER TABLE history ADD COLUMN cache_hit INTEGER DEFAULT 0")
     if "outcome_class" not in columns:
         conn.execute("ALTER TABLE history ADD COLUMN outcome_class TEXT DEFAULT 'success'")
+    if "error_kind" not in columns:
+        # 细粒度归因：由 lib/extractor 的异常类直接给出，不再靠文案猜。
+        # 历史行留空 —— 那批数据没有这个信息，无法事后补齐，
+        # 聚合查询用「error_kind = '' 时回退文案匹配」来兼容。
+        conn.execute("ALTER TABLE history ADD COLUMN error_kind TEXT DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_history_error_kind ON history(error_kind)")
     if "retry_count" not in columns:
         conn.execute("ALTER TABLE history ADD COLUMN retry_count INTEGER DEFAULT 0")
     if "success_attempt" not in columns:
@@ -285,8 +291,28 @@ def _admin_audit(action: str, ip: str):
         conn.close()
 
 
-def _classify_outcome(success: bool, error: str) -> str:
-    """Separate user input mistakes from upstream and internal failures."""
+def _classify_outcome(success: bool, error: str, error_kind: str = "") -> str:
+    """把一次提取归到粗粒度 outcome_class。
+
+    首选 extractor 给的 **error_kind**（谁抛错谁归因，见 lib/extractor.py 的错误归因一节）；
+    只有拿不到 kind 时才回退到文案匹配。之所以要这样：过去全靠对报错文案做关键词 LIKE，
+    文案改一个字分类就崩，而且根因不同的失败会共用同一句文案（真风控 / 平台 404 /
+    笔记已删除 全都写成「小红书平台暂时限制访问」），成功率与告警口径一起失真。
+    """
+    if success:
+        return "success"
+    coarse = ERROR_KIND_TO_OUTCOME.get((error_kind or "").strip())
+    if coarse:
+        return coarse
+    return _classify_outcome_by_text(success, error)
+
+
+def _classify_outcome_by_text(success: bool, error: str) -> str:
+    """兜底路径：对报错文案做关键词匹配。
+
+    ⚠️ 只在没有 error_kind（历史记录、旧缓存、外部调用）时使用。
+    新增抛错点时请改用 lib.extractor 里带 kind 的异常类，不要再往这里加关键词。
+    """
     if success:
         return "success"
     text = (error or "").lower()
@@ -541,8 +567,8 @@ def api_extract():
                 INSERT INTO history
                 (device_id, original_url, canonical_url, platform, title, caption,
                  author_name, publish_time, like_count, video_url, cover_url, status, error, duration_ms, cache_hit, outcome_class,
-                 retry_count, success_attempt, retry_reason, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 error_kind, retry_count, success_attempt, retry_reason, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     device_id, item["original_url"], item["canonical_url"], item["platform"],
@@ -551,6 +577,7 @@ def api_extract():
                     "success" if item["success"] else "error",
                     item["error"] if not item["success"] else "",
                     item["duration_ms"], int(item["cache_hit"]), item["outcome_class"],
+                    item.get("error_kind", "") or "",
                     int((item.get("telemetry") or {}).get("retry_count") or 0),
                     int((item.get("telemetry") or {}).get("success_attempt") or 0),
                     str((item.get("telemetry") or {}).get("retry_reason") or ""),
@@ -585,13 +612,14 @@ def api_extract():
             "partial": result.partial,
             "cache_hit": result.cache_hit,
             "telemetry": result.telemetry,
+            "error_kind": result.error_kind,
         }
         # 日志
         elapsed_ms = (time.monotonic() - started_at) * 1000
         item["duration_ms"] = round(elapsed_ms)
         if item["telemetry"]:
             log.info("请求性能分解 [%s] %s", result.platform_raw or "unknown", " ".join(f"{k}={v}ms" for k, v in item["telemetry"].items() if k.endswith("_ms")))
-        item["outcome_class"] = _classify_outcome(result.success, result.error)
+        item["outcome_class"] = _classify_outcome(result.success, result.error, result.error_kind)
         if result.success:
             log.info("提取成功%s [%s] %s -> %s (作者:%s 点赞:%d 耗时:%.0fms)",
                      "(仅转换)" if item.get("partial") else "",
@@ -632,7 +660,8 @@ def api_extract():
                         "title": "", "caption": "", "author_name": "", "publish_time": "",
                         "like_count": 0, "video_url": "", "canonical_url": "", "cover_url": "",
                         "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
-                        "partial": False,
+                        "partial": False, "error_kind": "internal_error",
+                        "outcome_class": "internal_error",
                     }
                 done += 1
                 success_count += int(item["success"])
@@ -1003,9 +1032,19 @@ def api_admin_errors():
         GROUP BY error ORDER BY c DESC LIMIT 30
         """, (since,)
     ).fetchall()
+    # 细粒度归因分布：error_kind 为空的是本列上线前的历史行（当时没有这个信息）
+    kind_rows = conn.execute(
+        """
+        SELECT CASE WHEN error_kind != '' THEN error_kind ELSE '(未归因·历史数据)' END AS k,
+               COUNT(*) c
+        FROM history WHERE created_at >= ? AND status != 'success'
+        GROUP BY k ORDER BY c DESC LIMIT 20
+        """, (since,)
+    ).fetchall()
     conn.close()
     errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
-    return jsonify({"success": True, "range": window, "errors": errors})
+    error_kinds = [{"kind": r["k"], "count": r["c"]} for r in kind_rows]
+    return jsonify({"success": True, "range": window, "errors": errors, "error_kinds": error_kinds})
 
 
 @app.route("/api/admin/performance", methods=["GET"])
@@ -1148,10 +1187,10 @@ def api_admin_export_csv():
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
     _, _, since = _admin_window()
     conn = _get_db()
-    rows = conn.execute("SELECT platform, status, outcome_class, error, duration_ms, cache_hit, created_at FROM history WHERE created_at >= ? ORDER BY id DESC", (since,)).fetchall()
+    rows = conn.execute("SELECT platform, status, outcome_class, error_kind, error, duration_ms, cache_hit, created_at FROM history WHERE created_at >= ? ORDER BY id DESC", (since,)).fetchall()
     conn.close()
     out = io.StringIO(); writer = csv.writer(out)
-    writer.writerow(["platform", "status", "outcome_class", "error", "duration_ms", "cache_hit", "created_at"])
+    writer.writerow(["platform", "status", "outcome_class", "error_kind", "error", "duration_ms", "cache_hit", "created_at"])
     writer.writerows([tuple(r) for r in rows])
     response = make_response(out.getvalue().encode("utf-8-sig"))
     response.headers["Content-Type"] = "text/csv; charset=utf-8"
@@ -1203,7 +1242,7 @@ def _parse_pool_json(raw):
 def _pool_run(args, stdin_text="", timeout=POOL_CMD_TIMEOUT):
     """调用代理池 CLI，取其中的 JSON 结果。
 
-    stdin_text 配合 pool.py 的 --pass-stdin 使用：密码走管道而不是命令行，
+    stdin_text 配合 pool.py 的 --pass-stdin 使用：口令走管道而不是命令行，
     因此不会出现在 ps / 进程命令行里。
     """
     try:
@@ -1236,7 +1275,7 @@ def _read_pool_config() -> dict:
 
 
 def _pool_recent_events(limit: int = 8) -> list:
-    """代理池日志里最近的事件（只留动作与出口 IP；日志本身不含密码）。"""
+    """代理池日志里最近的事件（只留动作与出口 IP；日志本身不含口令）。"""
     if not POOL_LOG_PATH.exists():
         return []
     try:
@@ -1332,7 +1371,7 @@ def api_admin_pool_failover():
 def api_admin_pool_add_account():
     """新增爱加速账号。
 
-    密码只经由 POST body → 子进程 stdin，不写日志、不进进程命令行；
+    口令只经由 POST body → 子进程 stdin，不写日志、不进进程命令行；
     配置文件由 pool.py 以 0600 落盘。
     """
     ip, err = _pool_precheck()
@@ -1342,26 +1381,23 @@ def api_admin_pool_add_account():
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
     user = str(body.get("user") or "").strip()
     password = str(body.get("password") or "")
-    if not user or not password:
-        return jsonify({"success": False, "error": "手机号和密码都不能为空"}), 400
+    if not name or not user or not password:
+        return jsonify({"success": False, "error": "账号名 / 手机号 / 口令 都不能为空"}), 400
     try:
         daily = max(0, min(int(body.get("dailySeconds") or 1200), 24 * 3600))
         reserve = max(0, min(int(body.get("reserveSeconds") or 0), 24 * 3600))
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "额度必须是整数秒"}), 400
-    args = ["add-account", "--user", user, "--pass-stdin",
+    args = ["add-account", "--name", name, "--user", user, "--pass-stdin",
             "--daily-seconds", str(daily), "--reserve-seconds", str(reserve)]
-    if name:
-        args += ["--name", name]
     note = str(body.get("note") or "").strip()
     if note:
         args += ["--note", note]
     ok, payload, _raw = _pool_run(args, stdin_text=password + "\n")
-    final_name = str(payload.get("name") or name or user)
-    _admin_audit(f"pool-add-account:{final_name}", ip)
+    _admin_audit(f"pool-add-account:{name}", ip)
     if not ok:
-        return jsonify({"success": False, "error": payload.get("message") or payload.get("error") or "新增失败，请核对手机号与密码"}), 400
-    return jsonify({"success": True, "name": final_name})
+        return jsonify({"success": False, "error": payload.get("message") or payload.get("error") or "新增失败，请核对手机号与口令"}), 400
+    return jsonify({"success": True, "name": name})
 
 
 @app.route("/api/admin/pool/account/remove", methods=["POST"])
@@ -1386,7 +1422,7 @@ def api_admin_pool_remove_account():
 
 @app.route("/api/admin/pool/account/update", methods=["POST"])
 def api_admin_pool_update_account():
-    """改账号非敏感项（启停 / 额度 / 预留 / 备注）。换手机号走新增，改密码走重置。"""
+    """改账号非敏感项（启停 / 额度 / 预留 / 备注）。换手机号走新增，改口令走重置。"""
     ip, err = _pool_precheck()
     if err:
         return err
@@ -1420,7 +1456,7 @@ def api_admin_pool_update_account():
 
 @app.route("/api/admin/pool/account/password", methods=["POST"])
 def api_admin_pool_set_password():
-    """重置账号密码：新密码同样走 stdin，并立刻验证登录是否通过。"""
+    """重置账号口令：新口令同样走 stdin，并立刻验证登录是否通过。"""
     ip, err = _pool_precheck()
     if err:
         return err
@@ -1428,14 +1464,14 @@ def api_admin_pool_set_password():
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
     password = str(body.get("password") or "")
     if not name or not password:
-        return jsonify({"success": False, "error": "账号名与新密码都不能为空"}), 400
+        return jsonify({"success": False, "error": "账号名与新口令都不能为空"}), 400
     ok, payload, _raw = _pool_run(
         ["set-password", "--name", name, "--pass-stdin"], stdin_text=password + "\n", timeout=90
     )
     _admin_audit(f"pool-set-password:{name}", ip)
     return jsonify({
         "success": bool(ok and payload.get("ok")),
-        "message": payload.get("message") or payload.get("error") or ("密码已更新" if ok else "重置失败"),
+        "message": payload.get("message") or payload.get("error") or ("口令已更新" if ok else "重置失败"),
     })
 
 

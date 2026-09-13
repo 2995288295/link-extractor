@@ -130,6 +130,9 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
 .section-tools input, .section-tools select { width:auto; margin:0; padding:6px 9px; font-size:12px; }
 .section-tools input { min-width:150px; }
 .action-tag { display:inline-block; margin-left:7px; padding:1px 6px; border-radius:4px; background:#fff4d8; color:#996400; font-size:11px; white-space:nowrap; }
+.kind-chips { display:flex; flex-wrap:wrap; gap:6px; margin:2px 0 8px; }
+.kind-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:999px; background:var(--primary-soft, #e1f3f1); color:var(--primary, #087f83); font-size:11px; white-space:nowrap; }
+.kind-chip b { font-weight:800; }
 .chart-wrap { position:relative; }
 .chart-tip { position:absolute; display:none; z-index:3; pointer-events:none; padding:6px 8px; border-radius:7px; background:#16263b; color:#fff; font-size:11px; line-height:1.5; white-space:nowrap; box-shadow:0 5px 14px rgba(22,38,59,.18); }
 
@@ -359,6 +362,7 @@ section.section-alerts { margin-bottom:16px; }
     <div class="grid2 bottom-grid dashboard-module full" data-module="analysis" data-title="失败与动态"><div class="module-head"><span class="drag-handle">⠿</span><b>失败与动态</b><span class="module-actions"></span></div>
       <div class="card">
         <div class="toolbar" style="margin-bottom:4px;"><h2 style="margin:0;">失败原因 TOP</h2><span class="updated" id="errorSummary"></span></div>
+        <div id="errorKindSummary" class="kind-chips"></div>
         <div id="errorList" class="list-collapsed"></div>
         <div class="more-row"><button id="errorMore" type="button">展开全部错误</button></div>
       </div>
@@ -412,9 +416,9 @@ section.section-alerts { margin-bottom:16px; }
       <div id="poolCreator" class="pool-form hidden">
         <b>新增爱加速账号</b>
         <div class="pool-form-grid">
+          <label>账号名（字母/数字）<input id="pcName" placeholder="如 acc2"></label>
           <label>手机号<input id="pcUser" placeholder="登录爱加速的手机号"></label>
-          <label>密码<input id="pcPassword" type="password" placeholder="爱加速登录密码"></label>
-          <label>账号名（可留空）<input id="pcName" placeholder="留空则用手机号"></label>
+          <label>口令<input id="pcPassword" type="password" placeholder="爱加速登录口令"></label>
           <label>每日额度（秒）<input id="pcDaily" type="number" value="1200"></label>
           <label>预留（秒，留给签到）<input id="pcReserve" type="number" value="0"></label>
           <label>备注<input id="pcNote" placeholder="可选"></label>
@@ -422,7 +426,7 @@ section.section-alerts { margin-bottom:16px; }
         <div class="pool-form-actions">
           <button class="btn btn-primary" style="width:auto" onclick="poolCreateAccount()">登记并验证登录</button>
           <button class="btn btn-ghost" onclick="togglePoolEditor()">取消</button>
-          <span class="pool-warn">密码只写入本机 0600 配置文件、不落日志；但本面板目前是明文 HTTP，请勿在不可信网络下操作。</span>
+          <span class="pool-warn">口令只写入本机 0600 配置文件、不落日志；但本面板目前是明文 HTTP，请勿在不可信网络下操作。</span>
         </div>
       </div>
 
@@ -433,7 +437,7 @@ section.section-alerts { margin-bottom:16px; }
           <label>每日额度（秒）<input id="peDaily" type="number"></label>
           <label>预留（秒）<input id="peReserve" type="number"></label>
           <label>备注<input id="peNote"></label>
-          <label>重置密码（留空不改）<input id="pePassword" type="password"></label>
+          <label>重置口令（留空不改）<input id="pePassword" type="password"></label>
         </div>
         <div class="pool-form-actions">
           <button class="btn btn-primary" style="width:auto" onclick="saveAccountEdit()">保存</button>
@@ -666,7 +670,27 @@ function renderDevices(devices) {
   more.textContent = expanded.devices ? "收起设备列表" : `展开全部设备（${filtered.length}）`;
 }
 
-function renderErrors(errors) {
+// 细粒度归因的中文说明：看板不再只显示「平台暂时限制」这句万能文案，
+// 而是直接摊开真实根因（限流 / 内容没了 / 页面结构变了 / 用户输入问题）。
+const KIND_LABELS = {
+  platform_limited: "平台限流（换IP可解）", short_link_blocked: "短链被限流",
+  not_found: "内容不存在", expired_content: "作品已删除/不可见", note_missing: "笔记不存在",
+  page_changed: "页面结构变化", upstream_data_missing: "平台未返回数据",
+  upstream_http: "上游HTTP错误", network: "网络异常", redirect_blocked: "重定向被拦",
+  invalid_input: "用户输入问题", unsupported_domain: "不支持的域名",
+  url_truncated: "链接被截断", missing_xsec_token: "缺 xsec_token", malformed_url: "链接粘贴变形",
+  internal_error: "未预期异常", "(未归因·历史数据)": "未归因（历史数据）",
+};
+
+function kindLabel(kind) { return KIND_LABELS[kind] || kind; }
+
+function renderErrors(errors, kinds) {
+  const kindEl = document.getElementById("errorKindSummary");
+  if (kindEl) {
+    kindEl.innerHTML = (kinds || []).map(k =>
+      `<span class="kind-chip">${esc(kindLabel(k.kind))} <b>${fmt(k.count)}</b></span>`
+    ).join("");
+  }
   const el = document.getElementById("errorList");
   if (!errors || !errors.length) { el.innerHTML = '<div class="empty">暂无失败记录</div>'; return; }
   const total = errors.reduce((n,e) => n + Number(e.count || 0), 0);
@@ -762,7 +786,7 @@ async function loadAll() {
     renderServiceStatus(healthRes, ov, perf);
     renderAlerts(ov, perf, healthRes);
     renderDevices(dev.devices);
-    renderErrors(errs.errors);
+    renderErrors(errs.errors, errs.error_kinds);
     renderRecent(recent.items);
     loadPool();
   } catch (e) {
@@ -958,7 +982,7 @@ async function poolDeepCheck(name) {
 function togglePoolEditor() {
   const el = document.getElementById("poolCreator");
   el.classList.toggle("hidden");
-  if (!el.classList.contains("hidden")) document.getElementById("pcUser").focus();
+  if (!el.classList.contains("hidden")) document.getElementById("pcName").focus();
 }
 
 async function poolCreateAccount() {
@@ -968,20 +992,18 @@ async function poolCreateAccount() {
   const dailySeconds = parseInt(document.getElementById("pcDaily").value || "1200", 10);
   const reserveSeconds = parseInt(document.getElementById("pcReserve").value || "0", 10);
   const note = (document.getElementById("pcNote").value || "").trim();
-  if (!user || !password) { showToast("手机号和密码都不能为空"); return; }
-  const label = name || user;
-  poolOutput("正在登记 " + label + " 并验证登录 …", "");
+  if (!name || !user || !password) { showToast("账号名 / 手机号 / 口令 都不能为空"); return; }
+  poolOutput("正在登记 " + name + " 并验证登录 …", "");
   try {
-    const r = await adminPost("/api/admin/pool/account", { name, user, password, dailySeconds, reserveSeconds, note });
-    const finalName = (r && r.name) || label;
+    await adminPost("/api/admin/pool/account", { name, user, password, dailySeconds, reserveSeconds, note });
     ["pcName", "pcUser", "pcPassword", "pcNote"].forEach(id => { const e = document.getElementById(id); if (e) e.value = ""; });
     document.getElementById("pcDaily").value = "1200";
     document.getElementById("pcReserve").value = "0";
     document.getElementById("poolCreator").classList.add("hidden");
-    showToast("账号 " + finalName + " 已登记并通过登录验证");
-    poolOutput("登记成功 · " + finalName, "登录验证通过。可用「深度体检」确认该账号的出口 IP 是否被小红书放行。");
+    showToast("账号 " + name + " 已登记并通过登录验证");
+    poolOutput("登记成功 · " + name, "登录验证通过。可用「深度体检」确认该账号的出口 IP 是否被小红书放行。");
     await loadPool();
-  } catch (e) { poolOutput("登记失败 · " + label, e.message); showToast(e.message); }
+  } catch (e) { poolOutput("登记失败 · " + name, e.message); showToast(e.message); }
 }
 
 function openAccountEdit(name) {
@@ -1008,7 +1030,7 @@ async function saveAccountEdit() {
     await adminPost("/api/admin/pool/account/update", { name, enabled, dailySeconds, reserveSeconds, note });
     if (password) {
       const r = await adminPost("/api/admin/pool/account/password", { name, password });
-      showToast(r.message || "密码已更新");
+      showToast(r.message || "口令已更新");
     } else {
       showToast("已保存 " + name);
     }
