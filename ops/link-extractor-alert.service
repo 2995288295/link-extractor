@@ -1,0 +1,14 @@
+[Unit]
+Description=link-extractor 异常巡检与飞书告警（5003）
+Documentation=file:/opt/link-extractor/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/link-extractor
+Environment=ALERT_CONF=/etc/link-extractor-alert.env
+Environment=ALERT_STATE=/var/lib/link-extractor-alert/state.json
+ExecStart=/opt/link-extractor/venv/bin/python3 /opt/link-extractor/ops/link-extractor-alert.py
+TimeoutStartSec=60
+Nice=5

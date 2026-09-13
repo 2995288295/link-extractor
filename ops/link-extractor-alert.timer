@@ -1,0 +1,11 @@
+[Unit]
+Description=每 5 分钟巡检 link-extractor 并推送异常到飞书（5003）
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=link-extractor-alert.service
+
+[Install]
+WantedBy=timers.target
