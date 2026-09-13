@@ -132,6 +132,140 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
 .action-tag { display:inline-block; margin-left:7px; padding:1px 6px; border-radius:4px; background:#fff4d8; color:#996400; font-size:11px; white-space:nowrap; }
 .chart-wrap { position:relative; }
 .chart-tip { position:absolute; display:none; z-index:3; pointer-events:none; padding:6px 8px; border-radius:7px; background:#16263b; color:#fff; font-size:11px; line-height:1.5; white-space:nowrap; box-shadow:0 5px 14px rgba(22,38,59,.18); }
+
+/* v1.6 运营指挥台视觉层：提升首屏扫描与异常可见性 */
+:root { --bg:#f3f7f7; --card:#ffffff; --border:#d8e3e3; --text:#172a2d; --text2:#687b7d; --primary:#087f83; --primary-soft:#e1f3f1; --success:#16805f; --error:#c94b4b; --warn:#bd7416; --radius:12px; }
+body { background:radial-gradient(circle at 90% -10%, #e1f2f0 0, transparent 32%), var(--bg); }
+.wrap { max-width:1240px; padding:28px 24px 44px; }
+header { margin-bottom:22px; align-items:center; }
+.eyebrow { letter-spacing:.2em; font-size:11px; }
+h1 { font-size:28px; letter-spacing:-.03em; }
+.card, .metric { border-color:var(--border); border-radius:12px; box-shadow:0 5px 18px rgba(33,73,76,.045); }
+.card { padding:18px 20px; margin-bottom:16px; }
+.card h2 { font-size:15px; letter-spacing:-.01em; }
+.metrics { gap:14px; margin-bottom:18px; }
+.metric { padding:16px 17px; position:relative; overflow:hidden; }
+.metric::after { content:""; position:absolute; width:58px; height:58px; border-radius:50%; right:-22px; bottom:-28px; background:var(--primary-soft); }
+.metric .value { font-size:29px; letter-spacing:-.04em; }
+.toolbar { margin-bottom:14px; }
+.status-strip { border-left-width:4px; border-radius:10px; padding:13px 15px; margin-bottom:14px; }
+.performance-card { background:#f9fbfb; }
+.performance-card .metric { box-shadow:none; border-color:transparent; background:transparent; }
+.insight-grid { grid-template-columns:1.45fr 1fr 1fr; gap:16px; }
+.insight-grid > .card { height:206px; }
+.chart-wrap { min-height:135px; }
+.bottom-grid > .card { height:440px; }
+section.section-alerts { margin-bottom:16px; }
+.alert-panel { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; }
+.alert-item { display:flex; align-items:flex-start; gap:11px; padding:13px 14px; border:1px solid #f0d5d5; border-radius:10px; background:#fffafa; }
+.alert-item.warn { border-color:#f0dfbb; background:#fffaf0; }
+.alert-icon { width:25px; height:25px; display:grid; place-items:center; flex:0 0 25px; border-radius:8px; color:#fff; background:var(--error); font-size:13px; font-weight:800; }
+.alert-item.warn .alert-icon { background:var(--warn); }
+.alert-title { font-size:13px; font-weight:700; }
+.alert-detail { margin-top:2px; color:var(--text2); font-size:12px; }
+.alert-empty { padding:13px 14px; color:var(--success); border:1px solid #cfe9df; border-radius:10px; background:#f5fcf8; font-size:13px; }
+@media (max-width:720px) { .wrap { padding:18px 12px 30px; } header { align-items:flex-start; } h1 { font-size:24px; } .alert-panel, .insight-grid { grid-template-columns:1fr; } .insight-grid > .card { height:auto; min-height:190px; } .performance-card .metrics { grid-template-columns:repeat(2,1fr) !important; } .toolbar { align-items:flex-start; flex-direction:column; } }
+
+/* v1.7 全量运营增强 */
+.nav-tabs { display:flex; gap:4px; margin:0 0 16px; padding:4px; background:#e8f0f0; border-radius:10px; width:max-content; }
+.nav-tab { border:0; background:transparent; color:var(--text2); padding:7px 13px; border-radius:7px; font-size:12px; cursor:pointer; }
+.nav-tab.active, .nav-tab:hover { background:#fff; color:var(--primary); box-shadow:0 1px 4px rgba(20,70,70,.1); font-weight:700; }
+.metric .trend { position:relative; z-index:1; margin-top:5px; font-size:11px; font-weight:700; }
+.trend.up { color:var(--success); } .trend.down { color:var(--error); } .trend.flat { color:var(--text2); }
+.platform-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:9px; }
+.platform-card { border:1px solid var(--border); border-radius:10px; padding:11px; background:#fbfdfd; }
+.platform-card .platform-name { font-weight:700; font-size:13px; } .platform-card .platform-num { font-size:22px; font-weight:800; margin-top:3px; }
+.platform-meta { display:flex; justify-content:space-between; color:var(--text2); font-size:11px; }
+.risk-high { color:var(--error); } .risk-warn { color:var(--warn); } .risk-ok { color:var(--success); }
+.err-rank { display:grid; grid-template-columns:25px minmax(0,1fr) auto; gap:8px; align-items:center; padding:9px 0; border-bottom:1px dashed #e6ecf4; }
+.err-rank:last-child { border-bottom:0; } .err-rank .rank { color:var(--primary); font-weight:800; } .err-rank .count { font-weight:750; }
+.err-bar { height:4px; background:#f0f3f4; border-radius:9px; margin-top:5px; overflow:hidden; } .err-bar i { display:block; height:100%; background:var(--error); border-radius:9px; }
+.dyn-item { padding:9px 0; } .dyn-item::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--primary); display:inline-block; margin-right:7px; vertical-align:1px; }
+@media (max-width:720px) { .nav-tabs { width:100%; overflow:auto; } .nav-tab { flex:1; white-space:nowrap; } }
+
+/* v1.8 溢出修复：内容驱动高度，避免平台卡片/表格互相覆盖 */
+.insight-grid > .card { height:auto; min-height:206px; }
+.insight-grid > .card > div { min-width:0; }
+.platform-grid { align-content:start; }
+.platform-card { min-height:96px; }
+.bottom-grid > .card { height:auto; min-height:420px; }
+.table-scroll { max-height:520px; overflow-x:auto; overflow-y:auto; }
+.table-scroll table { min-width:720px; }
+.bottom-grid .list-collapsed { max-height:330px; }
+.card { overflow:hidden; }
+@media (max-width:860px) { .insight-grid > .card { min-height:0; } }
+
+/* v1.9 模块化布局编辑器 */
+.layout-toolbar { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:9px 12px; margin-bottom:12px; border:1px solid var(--border); border-radius:10px; background:rgba(255,255,255,.72); color:var(--text2); font-size:12px; }
+.layout-toolbar > div { display:flex; gap:7px; } .layout-toolbar .btn-primary { width:auto; padding:7px 12px; }
+.dashboard-grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:16px; align-items:start; }
+.dashboard-module { grid-column:span 12; min-width:0; position:relative; }
+.dashboard-module.half { grid-column:span 6; } .dashboard-module.third { grid-column:span 4; }
+.dashboard-module .module-head { display:none; }
+.editing .dashboard-module { border:1px dashed #8ac8c6; border-radius:12px; padding:29px 8px 8px; background:rgba(225,243,241,.28); cursor:default; }
+.editing .dashboard-module .module-head { display:flex; position:absolute; left:8px; right:8px; top:6px; height:22px; align-items:center; gap:6px; color:var(--primary); font-size:11px; z-index:2; }
+.drag-handle { cursor:grab; font-size:16px; line-height:1; } .drag-handle:active { cursor:grabbing; }
+.module-actions { margin-left:auto; display:flex; gap:4px; } .module-action { border:1px solid var(--border); background:#fff; color:var(--text2); border-radius:5px; padding:2px 6px; font-size:10px; cursor:pointer; }
+.editing .dashboard-module.dragging { opacity:.55; outline:2px solid var(--primary); } .dashboard-module.module-hidden { display:none !important; }
+@media (max-width:860px) { .dashboard-module.half,.dashboard-module.third { grid-column:span 12; } }
+@media (max-width:720px) { .layout-toolbar { align-items:flex-start; flex-direction:column; } .layout-toolbar > div { width:100%; } .layout-toolbar button { flex:1; } .dashboard-grid { gap:12px; } }
+
+/* v2.0 对齐 + 自适应无级高度调整 */
+.insight-grid { align-items:stretch; grid-auto-rows:1fr; }
+.insight-grid > .card { height:auto; min-height:206px; display:flex; flex-direction:column; }
+.insight-grid > .card > div:last-child { flex:1; }
+.bottom-grid { align-items:stretch; }
+.bottom-grid > .card { height:auto; min-height:420px; display:flex; flex-direction:column; }
+.bottom-grid > .card > #errorList, .bottom-grid > .card > #recentList { flex:1; }
+.editing .dashboard-module { resize:vertical; overflow:auto; min-height:120px; }
+.editing .dashboard-module.full { min-height:120px; }
+.editing .dashboard-module .resize-hint { display:block; position:absolute; right:8px; bottom:4px; color:#78aaa9; font-size:11px; pointer-events:none; }
+.resize-hint { display:none; }
+@media (max-width:720px) { .editing .dashboard-module { resize:vertical; } }
+
+/* v2.1 细粒度组件编辑：趋势、平台、健康度、失败、动态独立操作 */
+.editing .insight-grid > .card, .editing .bottom-grid > .card { position:relative; border:1px dashed #8ac8c6; }
+.submodule-head { display:none; }
+.editing .submodule-head { display:flex; align-items:center; gap:6px; position:absolute; left:10px; right:10px; top:6px; height:20px; z-index:4; color:var(--primary); font-size:10px; }
+.editing .submodule-head .sub-drag { cursor:grab; font-size:15px; } .sub-actions { margin-left:auto; display:flex; gap:3px; }
+.editing .insight-grid > .card, .editing .bottom-grid > .card { padding-top:34px; resize:vertical; overflow:auto; min-height:150px; }
+.editing .submodule-resize { display:block; position:absolute; bottom:4px; right:8px; color:#78aaa9; font-size:10px; pointer-events:none; }
+.submodule-resize { display:none; }
+
+/* v2.2 代理池运维（爱加速换 IP 兜底） */
+.pool-grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(0,1fr); gap:14px; align-items:start; }
+@media (max-width:960px) { .pool-grid { grid-template-columns:1fr; } }
+.pool-side { display:flex; flex-direction:column; gap:12px; }
+.pool-card { border:1px solid var(--border); border-radius:10px; padding:11px 12px; background:#fbfdfd; }
+.pool-card-title { font-size:12px; font-weight:700; color:var(--text2); margin-bottom:8px; }
+.pool-trend { display:flex; align-items:flex-end; gap:5px; height:78px; }
+.pool-trend .bar-col { flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:3px; height:100%; }
+.pool-trend .bar-col i { display:block; width:100%; border-radius:4px 4px 0 0; background:#e3b0b0; min-height:2px; }
+.pool-trend .bar-col.calm i { background:#cfe4dd; }
+.pool-trend .bar-col small { font-size:10px; color:var(--text2); }
+.pool-events { display:flex; flex-direction:column; gap:5px; max-height:176px; overflow:auto; }
+.pool-events .ev { font-size:11px; color:var(--text2); border-bottom:1px dashed #e6ecf4; padding-bottom:4px; line-height:1.5; }
+.pool-events .ev b { color:var(--text); font-weight:650; }
+.pool-form { border:1px solid var(--border); border-radius:10px; padding:12px 13px; margin-top:12px; background:#f7fbfb; }
+.pool-form-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:9px; margin:9px 0; }
+.pool-form-grid label { font-size:12px; color:var(--text2); display:flex; flex-direction:column; gap:4px; }
+.pool-form-grid input { margin:0; padding:7px 9px; font-size:13px; }
+.pool-check { flex-direction:row !important; align-items:center; gap:6px !important; }
+.pool-check input { width:auto; margin:0; }
+.pool-form-actions { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.pool-warn { font-size:11px; color:var(--warn); line-height:1.5; }
+.pool-output { margin-top:12px; padding:10px 12px; border-radius:9px; background:#16263b; color:#e8f1f1; font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-all; max-height:230px; overflow:auto; }
+.pool-actions { display:flex; gap:4px; flex-wrap:wrap; }
+.pool-mini { border:1px solid var(--border); background:#fff; color:var(--text2); border-radius:5px; padding:2px 7px; font-size:11px; cursor:pointer; white-space:nowrap; }
+.pool-mini:hover { border-color:var(--primary); color:var(--primary); background:var(--primary-soft); }
+.pool-mini:disabled { opacity:.55; cursor:default; }
+.pool-mini.danger:hover { border-color:var(--error); color:var(--error); background:#fff0f1; }
+.pool-pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
+.pool-pill.on { background:#e6f6ef; color:var(--success); }
+.pool-pill.off { background:#eef1f3; color:var(--text2); }
+.pool-pill.warn { background:#fff7e6; color:var(--warn); }
+.pool-pill.bad { background:#fff0f1; color:var(--error); }
+#poolStrip .pool-mini { background:rgba(255,255,255,.75); }
 </style>
 </head>
 <body>
@@ -149,6 +283,8 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
     <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
       <button class="btn btn-ghost" onclick="logout()" title="结束当前管理员会话">退出登录</button>
     </div>
+    <nav class="nav-tabs" aria-label="看板视图"><button class="nav-tab active" data-view="overview">总览</button><button class="nav-tab" data-view="analysis">分析</button><button class="nav-tab" data-view="realtime">实时动态</button><button class="nav-tab" data-view="pool">代理池</button></nav>
+    <div class="layout-toolbar"><span id="layoutState">查看模式 · 布局自动保存</span><div><button class="btn btn-ghost" id="editLayoutBtn">编辑布局</button><button class="btn btn-ghost hidden" id="resetLayoutBtn">恢复默认</button><button class="btn btn-primary hidden" id="saveLayoutBtn">保存布局</button><button class="btn btn-ghost hidden" id="cancelLayoutBtn">取消</button></div></div>
 
     <div class="toolbar">
       <div><span class="updated" id="updatedAt">尚未刷新</span></div>
@@ -161,17 +297,24 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
       </div>
     </div>
 
-    <div id="statusStrip" class="status-strip"><span class="status-dot"></span><span id="statusText">正在检查服务状态…</span></div>
+    <div id="dashboardGrid" class="dashboard-grid">
+    <div class="dashboard-module full" data-module="status" data-title="服务状态"><div class="module-head"><span class="drag-handle">⠿</span><b>服务状态</b><span class="module-actions"></span></div><div id="statusStrip" class="status-strip"><span class="status-dot"></span><span id="statusText">正在检查服务状态…</span></div></div>
 
-    <div class="metrics">
-      <div class="metric"><div class="label">总提取次数</div><div class="value" id="mTotal">-</div></div>
+    <section class="section-alerts dashboard-module full" data-module="alerts" data-title="异常中心"><div class="module-head"><span class="drag-handle">⠿</span><b>异常中心</b><span class="module-actions"></span></div> aria-labelledby="alertsTitle">
+      <div class="card" style="margin-bottom:0;">
+        <div class="toolbar" style="margin-bottom:10px;"><h2 id="alertsTitle" style="margin:0;">异常中心</h2><span class="updated" id="alertSummary">正在分析</span></div>
+        <div id="alertPanel" class="alert-panel"><div class="alert-empty">正在读取服务指标…</div></div>
+      </div>
+    </section>
+
+    <div class="metrics dashboard-module full" data-module="metrics" data-title="核心指标"><div class="module-head"><span class="drag-handle">⠿</span><b>核心指标</b><span class="module-actions"></span></div>
+      <div class="metric"><div class="label">总提取次数</div><div class="value" id="mTotal">-</div><div class="trend flat" id="mTotalTrend">窗口数据</div></div>
       <div class="metric"><div class="label">转换成功率</div><div class="value" id="mRate">-</div><div class="sub" id="mFail">失败 - · 服务稳定性 -</div></div>
       <div class="metric"><div class="label">窗口活跃设备</div><div class="value" id="mDevices">-</div><div class="sub" id="mDevicesSub">7天 - · 30天 -</div></div>
-      <div class="metric"><div class="label">今日提取</div><div class="value" id="mToday">-</div></div>
-      <div class="metric"><div class="label">防护拦截</div><div class="value" id="mBlocked">-</div><div class="sub" id="mBlockedSub">失败缓存 - · 冷却 -</div></div>
+      <div class="metric"><div class="label">今日提取</div><div class="value" id="mToday">-</div><div class="trend flat" id="mTodayTrend">实时累计</div></div>
     </div>
 
-    <div class="card performance-card">
+    <div class="card performance-card dashboard-module full" data-module="performance" data-title="性能与缓存"><div class="module-head"><span class="drag-handle">⠿</span><b>性能与缓存</b><span class="module-actions"></span></div>
       <h2>性能与缓存</h2>
       <div class="metrics" style="margin:0;grid-template-columns:repeat(4,1fr);">
         <div class="metric"><div class="label">平均耗时</div><div class="value" id="pAvg">-</div><div class="sub">毫秒</div></div>
@@ -182,14 +325,14 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
       <div id="retryInsight" class="sub" style="margin-top:12px;color:var(--muted)">抖音重试成功分布：暂无数据</div>
     </div>
 
-    <div class="insight-grid">
+    <div class="insight-grid dashboard-module full" data-module="insights" data-title="趋势与平台"><div class="module-head"><span class="drag-handle">⠿</span><b>趋势与平台</b><span class="module-actions"></span></div>
       <div class="card">
-        <h2 id="trendTitle">近 7 天提取趋势</h2>
+        <div class="toolbar" style="margin-bottom:8px;"><h2 id="trendTitle" style="margin:0;">近 7 天提取趋势</h2><select id="trendMetric" class="range-select" aria-label="趋势指标"><option value="count">提取量</option><option value="rate">成功率</option></select></div>
         <div class="chart-wrap"><div id="trendChart"></div><div id="chartTip" class="chart-tip"></div></div>
       </div>
       <div class="card">
-        <h2>平台分布（成功）</h2>
-        <div id="platformDist"></div>
+        <h2>平台表现</h2>
+        <div id="platformDist" class="platform-grid"></div>
       </div>
       <div class="card">
         <h2>平台健康度</h2>
@@ -197,7 +340,7 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
       </div>
     </div>
 
-    <div class="card">
+    <div class="card dashboard-module full" data-module="devices" data-title="设备使用排行"><div class="module-head"><span class="drag-handle">⠿</span><b>设备使用排行</b><span class="module-actions"></span></div>
       <h2>设备使用排行</h2>
       <div class="section-tools">
         <input id="deviceSearch" type="search" placeholder="搜索设备 ID" aria-label="搜索设备">
@@ -213,33 +356,96 @@ input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(23,105,22
       <div class="more-row"><button id="deviceMore" type="button">展开全部设备</button></div>
     </div>
 
-    <div class="card">
-      <h2>重试热点链接 TOP（同一链接高频提交）</h2>
-      <div class="table-scroll" style="max-height:260px;">
-        <table>
-          <thead><tr><th>链接（脱敏）</th><th>平台</th><th class="num">提交次数</th><th class="num">成功</th><th class="num">失败</th><th>最后提交</th></tr></thead>
-          <tbody id="retryHotBody"></tbody>
-        </table>
-      </div>
-      <div id="retryHotEmpty" class="empty hidden">窗口内无高频重试链接</div>
-    </div>
-
-    <div class="grid2 bottom-grid">
+    <div class="grid2 bottom-grid dashboard-module full" data-module="analysis" data-title="失败与动态"><div class="module-head"><span class="drag-handle">⠿</span><b>失败与动态</b><span class="module-actions"></span></div>
       <div class="card">
-        <h2>失败原因 TOP</h2>
+        <div class="toolbar" style="margin-bottom:4px;"><h2 style="margin:0;">失败原因 TOP</h2><span class="updated" id="errorSummary"></span></div>
         <div id="errorList" class="list-collapsed"></div>
         <div class="more-row"><button id="errorMore" type="button">展开全部错误</button></div>
       </div>
       <div class="card">
         <h2>最近动态（脱敏）</h2>
-        <div class="section-tools"><select id="recentPlatform" aria-label="平台筛选"><option value="all">全部平台</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select><select id="recentStatus" aria-label="状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="error">失败</option><option value="blocked">拦截</option></select></div>
+        <div class="section-tools"><select id="recentPlatform" aria-label="平台筛选"><option value="all">全部平台</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select><select id="recentStatus" aria-label="状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="error">失败</option></select></div>
         <div id="recentList" class="list-collapsed"></div>
         <div class="more-row"><button id="recentMore" type="button">展开全部动态</button></div>
       </div>
     </div>
+
+    <div class="card dashboard-module full" data-module="pool" data-title="代理池运维">
+      <div class="module-head"><span class="drag-handle">⠿</span><b>代理池运维</b><span class="module-actions"></span></div>
+      <div class="toolbar" style="margin-bottom:10px;">
+        <h2 style="margin:0;">代理池运维 <span class="updated" id="poolSubtitle">爱加速 · 换 IP 兜底</span></h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" onclick="loadPool()">↻ 刷新</button>
+          <button class="btn btn-ghost" onclick="poolCheckAll()">全量轻检</button>
+          <button class="btn btn-ghost" onclick="poolDeepCheck('')">深度体检</button>
+          <button class="btn btn-ghost" onclick="togglePoolEditor()">+ 新增账号</button>
+        </div>
+      </div>
+
+      <div id="poolStrip" class="status-strip">
+        <span class="status-dot"></span>
+        <span id="poolStripText" style="flex:1;">正在读取代理池…</span>
+        <button class="pool-mini" id="poolFailoverBtn" onclick="poolToggleFailover()">切换兜底</button>
+      </div>
+
+      <div class="pool-grid">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>账号</th><th>启用</th><th class="num">已用 / 额度</th><th class="num">剩余</th><th class="num">预留</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="poolBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pool-side">
+          <div class="pool-card">
+            <div class="pool-card-title">风控失败趋势（近 7 天 · 与兜底开关无关）</div>
+            <div id="poolRiskTrend" class="pool-trend"></div>
+          </div>
+          <div class="pool-card">
+            <div class="pool-card-title">最近事件</div>
+            <div id="poolEvents" class="pool-events"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="poolOutput" class="pool-output hidden"></div>
+
+      <div id="poolCreator" class="pool-form hidden">
+        <b>新增爱加速账号</b>
+        <div class="pool-form-grid">
+          <label>手机号<input id="pcUser" placeholder="登录爱加速的手机号"></label>
+          <label>密码<input id="pcPassword" type="password" placeholder="爱加速登录密码"></label>
+          <label>账号名（可留空）<input id="pcName" placeholder="留空则用手机号"></label>
+          <label>每日额度（秒）<input id="pcDaily" type="number" value="1200"></label>
+          <label>预留（秒，留给签到）<input id="pcReserve" type="number" value="0"></label>
+          <label>备注<input id="pcNote" placeholder="可选"></label>
+        </div>
+        <div class="pool-form-actions">
+          <button class="btn btn-primary" style="width:auto" onclick="poolCreateAccount()">登记并验证登录</button>
+          <button class="btn btn-ghost" onclick="togglePoolEditor()">取消</button>
+          <span class="pool-warn">密码只写入本机 0600 配置文件、不落日志；但本面板目前是明文 HTTP，请勿在不可信网络下操作。</span>
+        </div>
+      </div>
+
+      <div id="poolEditor" class="pool-form hidden">
+        <b>编辑账号 <span id="peName"></span></b>
+        <div class="pool-form-grid">
+          <label class="pool-check"><input id="peEnabled" type="checkbox"> 启用（停用后不参与兜底）</label>
+          <label>每日额度（秒）<input id="peDaily" type="number"></label>
+          <label>预留（秒）<input id="peReserve" type="number"></label>
+          <label>备注<input id="peNote"></label>
+          <label>重置密码（留空不改）<input id="pePassword" type="password"></label>
+        </div>
+        <div class="pool-form-actions">
+          <button class="btn btn-primary" style="width:auto" onclick="saveAccountEdit()">保存</button>
+          <button class="btn btn-ghost" onclick="document.getElementById('poolEditor').classList.add('hidden')">取消</button>
+          <span class="pool-warn">手机号不在这里改：换手机号等同于换一个账号，请用「新增账号」。</span>
+        </div>
+      </div>
+    </div>
+    </div>
   </div>
 
-  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.6.6</div>
+  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.0</div>
 </div>
 
 <div id="loginOverlay">
@@ -334,30 +540,35 @@ function renderTrend(trend) {
   const max = Math.max(...trend.map(t => t.count), 1);
   const w = 360, h = 110, pad = 18;
   const step = (w - pad * 2) / Math.max(trend.length - 1, 1);
-  const yOf = v => h - pad - ((v || 0) / max) * (h - pad * 2);
-  const lineOf = key => trend.map((t, i) => [pad + i * step, yOf(t[key])]);
-  const poly = key => lineOf(key).map(p => p.join(",")).join(" ");
-  const dots = trend.map((t, i) => {
-    const p = [pad + i * step, yOf(t.count)];
-    return `<circle data-trend-index="${i}" cx="${p[0]}" cy="${p[1]}" r="4" fill="#1769e0" style="cursor:crosshair"><title>${trend[i].date} 共${trend[i].count}条 成功${trend[i].ok}</title></circle>`;
-  }).join("");
+  const pts = trend.map((t, i) => {
+    const x = pad + i * step;
+    const y = h - pad - (t.count / max) * (h - pad * 2);
+    return [x, y];
+  });
+  const line = pts.map(p => p.join(",")).join(" ");
+  const okPts = trend.map((t, i) => {
+    const x = pad + i * step;
+    const y = h - pad - ((t.ok || 0) / max) * (h - pad * 2);
+    return [x, y];
+  });
+  const dots = pts.map((p, i) =>
+    `<circle data-trend-index="${i}" cx="${p[0]}" cy="${p[1]}" r="4" fill="#1769e0" style="cursor:crosshair"><title>${trend[i].date} 共${trend[i].count}条 成功${trend[i].ok}</title></circle>`
+  ).join("");
   el.innerHTML = `
     <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;">
       <line x1="${pad}" y1="${h - pad}" x2="${w - pad}" y2="${h - pad}" stroke="#dbe3ee" stroke-width="1"/>
-      <polyline points="${poly("count")}" fill="none" stroke="#1769e0" stroke-width="2"/>
-      <polyline points="${poly("ok")}" fill="none" stroke="#18a866" stroke-width="2" stroke-dasharray="4 3"/>
-      <polyline points="${poly("douyin")}" fill="none" stroke="#1a1a1a" stroke-width="1.5" stroke-opacity="0.55"/>
-      <polyline points="${poly("xiaohongshu")}" fill="none" stroke="#d63384" stroke-width="1.5" stroke-opacity="0.65"/>
+      <polyline points="${line}" fill="none" stroke="#1769e0" stroke-width="2"/>
+      <polyline points="${okPts.map(p => p.join(",")).join(" ")}" fill="none" stroke="#18a866" stroke-width="2" stroke-dasharray="4 3"/>
       ${dots}
     </svg>
     <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);">
       ${trend.map(t => `<span>${esc(t.date)}</span>`).join("")}
-    </div><div style="font-size:11px;color:var(--text2);margin-top:3px;"><span style="color:#1769e0;font-weight:600;">━</span> 总提取 · <span style="color:#18a866;font-weight:600;">┅</span> 成功 · <span style="color:#1a1a1a;font-weight:600;">━</span> 抖音 · <span style="color:#d63384;font-weight:600;">━</span> 小红书</div>`;
+    </div><div style="font-size:11px;color:var(--text2);margin-top:3px;">蓝线 总提取 · 绿虚线 成功</div>`;
   const tip = document.getElementById("chartTip");
   el.querySelectorAll("circle[data-trend-index]").forEach(dot => {
     dot.addEventListener("mouseenter", () => {
       const item = trend[Number(dot.dataset.trendIndex)];
-      tip.innerHTML = `<strong>${esc(item.date)}</strong><br>提取 ${fmt(item.count)} 条 · 成功 ${fmt(item.ok)} · 失败 ${fmt(item.fail ?? item.count - item.ok)} 条<br>抖音 ${fmt(item.douyin ?? 0)} · 小红书 ${fmt(item.xiaohongshu ?? 0)}`;
+      tip.innerHTML = `<strong>${esc(item.date)}</strong><br>提取 ${fmt(item.count)} 条 · 成功 ${fmt(item.ok)}<br>失败 ${fmt(item.fail ?? item.count - item.ok)} 条`;
       const wrap = tip.parentElement.getBoundingClientRect();
       const rect = dot.getBoundingClientRect();
       tip.style.left = `${Math.max(4, rect.left - wrap.left - 28)}px`;
@@ -370,19 +581,12 @@ function renderTrend(trend) {
 
 function renderPlatform(dist) {
   const el = document.getElementById("platformDist");
-  const entries = Object.entries(dist || {});
-  if (!entries.length) { el.innerHTML = '<div class="empty">暂无成功数据</div>'; return; }
-  const total = entries.reduce((s, [, v]) => s + v, 0);
-  el.innerHTML = entries.map(([name, v]) => {
-    const pct = total ? Math.round(v / total * 100) : 0;
-    const cls = name === "抖音" ? "douyin" : name === "小红书" ? "xhs" : "";
-    return `<div class="bar-row">
-      <div class="bar-label"><span>${esc(name)}</span><span>${pct}% · ${fmt(v)}</span></div>
-      <div class="bar"><i class="${cls}" style="width:${pct}%"></i></div>
-    </div>`;
-  }).join("");
+  const rows = Object.entries(dist || {});
+  if (!rows.length) { el.innerHTML = '<div class="empty">暂无平台数据</div>'; return; }
+  const total = rows.reduce((n, [,v]) => n + Number(v || 0), 0);
+  const names = { douyin:"抖音", xiaohongshu:"小红书", "抖音":"抖音", "小红书":"小红书" };
+  el.innerHTML = rows.map(([k,v]) => { const pct = total ? (Number(v)/total*100).toFixed(1) : 0; return `<div class="platform-card"><div class="platform-name">${esc(names[k] || k)}</div><div class="platform-num">${fmt(v)}</div><div class="platform-meta"><span>成功提取</span><b>${pct}%</b></div><div class="bar" style="margin-top:7px"><i class="${k === "xiaohongshu" || k === "小红书" ? "xhs" : "douyin"}" style="width:${pct}%"></i></div></div>`; }).join("");
 }
-
 function renderPlatformHealth(health) {
   const el = document.getElementById("platformHealth");
   const entries = Object.entries(health || {});
@@ -401,28 +605,19 @@ function renderServiceStatus(health, ov, perf) {
   const p95 = Number(perf.p95_duration_ms || 0);
   const uptimeLabel = health && Number.isFinite(Number(health.uptime_seconds)) ? formatUptime(health.uptime_seconds) : "未连接";
   document.getElementById("headerUptime").textContent = `运行 ${uptimeLabel}`;
-  const risk = ov.risk || {};
   let state = "ok";
   strip.className = "status-strip";
-  let msg = "";
-  if (risk.level === "risk") {
-    state = "bad"; strip.classList.add("bad");
-    msg = `⚠️ ${risk.title}：${risk.detail}`;
-  } else if (!health || health.status !== "ok") {
-    state = "bad"; strip.classList.add("bad"); msg = "服务异常：健康检查未通过";
-  } else if (risk.level === "warn") {
-    state = "warn"; strip.classList.add("warn");
-    msg = `⚠️ ${risk.title}：${risk.detail}`;
+  if (!health || health.status !== "ok") {
+    state = "bad"; strip.classList.add("bad"); text.textContent = "服务异常：健康检查未通过";
   } else if (rate < 90 || p95 > 5000) {
-    state = "warn"; strip.classList.add("warn"); msg = `需要关注：服务稳定性 ${rate}% · P95 ${fmt(p95)}ms`;
+    state = "warn"; strip.classList.add("warn"); text.textContent = `需要关注：服务稳定性 ${rate}% · P95 ${fmt(p95)}ms`;
   } else {
     const uptime = health && Number.isFinite(Number(health.uptime_seconds)) ? ` · 运行 ${formatUptime(health.uptime_seconds)}` : "";
-    msg = `服务正常：稳定性 ${rate}% · P95 ${fmt(p95)}ms${uptime}`;
+    text.textContent = `服务正常：稳定性 ${rate}% · P95 ${fmt(p95)}ms${uptime}`;
   }
-  text.textContent = msg;
   document.title = state === "ok" ? "运营看板 · 链接提取工具" : "⚠️ 运营看板 · 需要关注";
   if (window._lastDashboardState && window._lastDashboardState !== state && state !== "ok") {
-    showToast(state === "bad" ? "服务异常或风控风险，请立即检查" : "服务指标需要关注");
+    showToast(state === "bad" ? "服务异常，请立即检查" : "服务指标需要关注");
   }
   window._lastDashboardState = state;
 }
@@ -431,6 +626,20 @@ function formatUptime(seconds) {
   const s = Math.max(0, Number(seconds) || 0);
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
   return d ? `${d}天${h}小时` : h ? `${h}小时${m}分` : `${m}分`;
+}
+
+function renderAlerts(ov, perf, health) {
+  const panel = document.getElementById("alertPanel");
+  const summary = document.getElementById("alertSummary");
+  const alerts = [];
+  const rate = Number(ov.service_success_rate ?? ov.success_rate ?? 0);
+  const p95 = Number(perf.p95_duration_ms || 0);
+  if (!health || health.status !== "ok") alerts.push({kind:"bad", title:"服务健康检查未通过", detail:"请立即检查 5003 服务进程与网络状态。"});
+  if (rate > 0 && rate < 90) alerts.push({kind:"bad", title:`服务成功率 ${rate}%`, detail:"低于 90% 运营阈值，建议优先查看失败原因 TOP。"});
+  if (p95 > 5000) alerts.push({kind:"warn", title:`P95 耗时 ${fmt(p95)}ms`, detail:"响应速度偏慢，建议检查平台风控、重试和队列并发。"});
+  if (!alerts.length) { summary.textContent = "当前无高优先级异常"; panel.innerHTML = '<div class="alert-empty">✓ 服务指标处于安全区间，暂无需要立即处理的问题</div>'; return; }
+  summary.textContent = `${alerts.length} 项需要关注`;
+  panel.innerHTML = alerts.map(a => `<div class="alert-item ${a.kind === "warn" ? "warn" : ""}"><div class="alert-icon">${a.kind === "warn" ? "!" : "×"}</div><div><div class="alert-title">${esc(a.title)}</div><div class="alert-detail">${esc(a.detail)}</div></div></div>`).join("");
 }
 
 function renderDevices(devices) {
@@ -457,36 +666,16 @@ function renderDevices(devices) {
   more.textContent = expanded.devices ? "收起设备列表" : `展开全部设备（${filtered.length}）`;
 }
 
-function renderRetryHot(items) {
-  const body = document.getElementById("retryHotBody");
-  const empty = document.getElementById("retryHotEmpty");
-  if (!items || !items.length) { body.innerHTML = ""; empty.classList.remove("hidden"); return; }
-  empty.classList.add("hidden");
-  body.innerHTML = items.map(it => `
-    <tr>
-      <td style="font-family:monospace;font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(it.url)}">${esc(it.url)}</td>
-      <td>${esc(it.platform)}</td>
-      <td class="num" style="font-weight:600;">${fmt(it.count)}</td>
-      <td class="num ok">${fmt(it.ok)}</td>
-      <td class="num fail">${fmt(it.fail)}</td>
-      <td style="color:var(--text2);font-size:12px;">${esc((it.last_at || "").slice(5))}</td>
-    </tr>`).join("");
-}
-
 function renderErrors(errors) {
   const el = document.getElementById("errorList");
   if (!errors || !errors.length) { el.innerHTML = '<div class="empty">暂无失败记录</div>'; return; }
+  const total = errors.reduce((n,e) => n + Number(e.count || 0), 0);
   const visible = expanded.errors ? errors : errors.slice(0, 10);
   el.classList.toggle("list-expanded", expanded.errors);
-  el.innerHTML = visible.map(e => {
-    const action = errorAction(e.error);
-    return `<div class="err-item"><span class="txt" title="${esc(e.error)}">${esc(e.error)}${action ? `<span class="action-tag">${esc(action)}</span>` : ""}</span><span>${e.count}</span></div>`;
-  }).join("");
-  const more = document.getElementById("errorMore");
-  more.classList.toggle("hidden", errors.length <= 10);
-  more.textContent = expanded.errors ? "收起错误列表" : `展开全部错误（${errors.length}）`;
+  document.getElementById("errorSummary").textContent = `${fmt(total)} 次失败`;
+  el.innerHTML = visible.map((e,i) => { const pct = total ? (Number(e.count)/total*100).toFixed(1) : 0; const action = errorAction(e.error); return `<div class="err-rank"><span class="rank">${String(i+1).padStart(2,"0")}</span><span class="txt" title="${esc(e.error)}">${esc(e.error)}${action ? `<span class="action-tag">${esc(action)}</span>` : ""}<span class="err-bar"><i style="width:${pct}%"></i></span></span><span class="count">${fmt(e.count)}<small style="color:var(--text2);font-weight:400"> · ${pct}%</small></span></div>`; }).join("");
+  const more = document.getElementById("errorMore"); more.classList.toggle("hidden", errors.length <= 10); more.textContent = expanded.errors ? "收起错误列表" : `展开全部错误（${errors.length}）`;
 }
-
 function errorAction(error) {
   const text = String(error || "");
   if (text.includes("xsec_token")) return "让用户重新复制小红书链接";
@@ -513,9 +702,7 @@ function renderRecent(items) {
   el.innerHTML = visible.map(it => {
     const status = it.status === "success"
       ? '<span class="ok">成功</span>'
-      : it.status === "blocked"
-        ? '<span style="color:#b8860b;font-weight:600;">拦截</span>'
-        : `<span class="fail">失败</span>`;
+      : `<span class="fail">失败</span>`;
     const extra = it.status !== "success" && it.error ? ` · ${esc(it.error.slice(0, 30))}` : "";
     return `<div class="dyn-item">
       <span>${esc(nameMap[it.platform] || it.platform || "未知")} ${status}${extra}</span>
@@ -542,23 +729,21 @@ async function loadAll() {
     const range = document.getElementById("rangeSelect").value;
     document.getElementById("trendTitle").textContent = range === "24h" ? "最近 24 小时提取" : range === "30d" ? "近 30 天提取趋势" : "近 7 天提取趋势";
     const q = `?range=${encodeURIComponent(range)}`;
-    const [ov, dev, errs, recent, perf, hot, healthRes] = await Promise.all([
+    const [ov, dev, errs, recent, perf, healthRes] = await Promise.all([
       adminFetch("/api/admin/overview" + q),
       adminFetch("/api/admin/devices" + q + "&limit=100"),
       adminFetch("/api/admin/errors" + q),
       adminFetch("/api/admin/recent" + q),
       adminFetch("/api/admin/performance" + q),
-      adminFetch("/api/admin/retry_hot" + q),
       fetch("/api/health").then(r => r.json()).catch(() => null),
     ]);
     document.getElementById("mTotal").textContent = fmt(ov.total);
     document.getElementById("mRate").textContent = ov.success_rate + "%";
     document.getElementById("mFail").textContent = `失败 ${fmt(ov.fail)} · 服务稳定性 ${ov.service_success_rate ?? ov.success_rate}%`;
-    document.getElementById("mBlocked").textContent = fmt(ov.blocked_total ?? 0);
-    document.getElementById("mBlockedSub").textContent = `失败缓存 ${fmt(ov.blocked_cache ?? 0)} · 冷却 ${fmt(ov.blocked_cooldown ?? 0)}`;
     document.getElementById("mDevices").textContent = fmt(ov.active_devices);
     document.getElementById("mDevicesSub").textContent = `7天 ${fmt(ov.active_devices_7d)} · 30天 ${fmt(ov.active_devices_30d)}`;
     document.getElementById("mToday").textContent = fmt(ov.today_count);
+    const trend = ov.trend || []; const last = Number(trend.at(-1)?.count || 0), prev = Number(trend.at(-2)?.count || 0); const delta = prev ? ((last-prev)/prev*100).toFixed(1) : "0.0"; const trendEl = document.getElementById("mTotalTrend"); trendEl.textContent = `${delta >= 0 ? "↑" : "↓"} ${Math.abs(delta)}% 较上一周期`; trendEl.className = `trend ${delta > 0 ? "up" : delta < 0 ? "down" : "flat"}`;
     document.getElementById("pAvg").textContent = fmt(perf.avg_duration_ms);
     document.getElementById("p95").textContent = fmt(perf.p95_duration_ms);
     document.getElementById("pHit").textContent = perf.cache_hit_rate + "%";
@@ -575,17 +760,319 @@ async function loadAll() {
     renderPlatform(ov.platform_dist);
     renderPlatformHealth(ov.platform_health);
     renderServiceStatus(healthRes, ov, perf);
+    renderAlerts(ov, perf, healthRes);
     renderDevices(dev.devices);
-    renderRetryHot(hot.items);
     renderErrors(errs.errors);
     renderRecent(recent.items);
+    loadPool();
   } catch (e) {
     if (e.message === "unauthorized") { logout(); showToast("请重新登录"); }
     else showToast("加载失败，请点击刷新重试");
   }
 }
 
+/* ================= v2.2 代理池运维（爱加速换 IP 兜底） ================= */
+let poolState = null;
+
+async function adminPost(url, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (adminToken) headers["X-Admin-Token"] = adminToken;
+  const csrf = readCookie("csrf_token");
+  if (csrf) headers["X-CSRF-Token"] = csrf;
+  const res = await fetch(url, {
+    method: "POST", headers, credentials: "same-origin",
+    body: JSON.stringify(body || {}),
+  });
+  if (res.status === 401 || res.status === 503) throw new Error("unauthorized");
+  const json = await res.json().catch(() => ({}));
+  if (!json.success) throw new Error(json.error || "操作失败");
+  return json;
+}
+
+function poolPill(text, kind) { return '<span class="pool-pill ' + kind + '">' + esc(text) + "</span>"; }
+
+function poolAccountStatus(a) {
+  if (!a.enabled) return poolPill("已停用", "off");
+  if (a.exhausted) return poolPill(a.exhaustedReason || "额度用尽", "bad");
+  if ((a.consecutiveFails || 0) >= 3) return poolPill("连续失败 " + a.consecutiveFails, "warn");
+  if ((a.leases || 0) > 0) return poolPill("正常", "on");
+  return poolPill("未使用", "off");
+}
+
+async function loadPool() {
+  try {
+    const data = await adminFetch("/api/admin/pool/status");
+    poolState = data;
+    renderPoolStrip(data);
+    renderPoolTable(data);
+    renderPoolTrend(data.riskTrend || []);
+    renderPoolEvents(data.recentEvents || []);
+  } catch (e) {
+    if (e.message === "unauthorized") { logout(); showToast("请重新登录"); return; }
+    document.getElementById("poolStripText").textContent = "代理池读取失败：" + e.message;
+  }
+}
+
+function renderPoolStrip(data) {
+  const p = data.pool || {}, cfg = data.config || {}, fr = p.freeze || {};
+  const strip = document.getElementById("poolStrip");
+  const on = !!p.failoverEnabled, avail = !!data.poolAvailable;
+  const busy = !!p.proxyPortBusy, sheapi = !!p.sheapiCycleRunning;
+  strip.classList.remove("warn", "bad");
+  if (!avail) strip.classList.add("bad");
+  else if (on) strip.classList.add("warn");
+
+  const bits = [];
+  bits.push("<b>兜底：" + (on ? "已开启" : "已关闭") + "</b>");
+  if (avail) {
+    bits.push("池剩余 " + fmt(p.poolRemainingSeconds) + "s / " + fmt(p.poolBudgetSeconds) + "s");
+    bits.push("账号 " + (p.accounts || []).length + " 个");
+  } else {
+    bits.push("代理池不可用");
+  }
+  bits.push("1080" + (busy ? "占用中" : "空闲"));
+  if (sheapi) bits.push("签到轮换进行中");
+  if (fr.enabled) {
+    bits.push("冻结窗口 " + esc(fr.start) + "–" + esc(fr.end) + (fr.frozen ? "（当前生效，不切IP）" : ""));
+  }
+  const lease = p.lease || {};
+  if (lease.active) {
+    bits.push("当前租约 " + esc(lease.exitIp || "-") + "（" + esc(lease.reason || "-") + "）");
+  } else {
+    bits.push("无活动租约");
+  }
+  document.getElementById("poolStripText").innerHTML = bits.join(" · ");
+
+  const btn = document.getElementById("poolFailoverBtn");
+  btn.textContent = on ? "关闭兜底" : "开启兜底";
+  btn.disabled = !avail;
+  document.getElementById("poolSubtitle").textContent =
+    "爱加速 · 换 IP 兜底" + (on ? "（开启）" : "（关闭）") + (fr.frozen ? " · 冻结中" : "");
+}
+
+function renderPoolTable(data) {
+  const body = document.getElementById("poolBody");
+  const accounts = (data.pool && data.pool.accounts) || [];
+  if (!accounts.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">还没有登记任何爱加速账号</td></tr>';
+    return;
+  }
+  body.innerHTML = accounts.map(a => {
+    const pct = a.dailySeconds ? Math.min(100, Math.round((a.usedSeconds / a.dailySeconds) * 100)) : 0;
+    const usedTitle = esc("额度 " + a.dailySeconds + "s · 已用 " + a.usedSeconds + "s（" + pct + "%）" +
+      (a.reserveSeconds ? " · 预留 " + a.reserveSeconds + "s" : "") +
+      (a.leases ? " · 租约 " + a.leases + " 次" : "") +
+      (a.lastUsed ? " · 最近 " + a.lastUsed : ""));
+    return "<tr>" +
+      '<td><b>' + esc(a.name) + '</b>' + (a.note ? '<div class="updated">' + esc(a.note) + '</div>' : "") + "</td>" +
+      "<td>" + (a.enabled ? poolPill("启用", "on") : poolPill("停用", "off")) + "</td>" +
+      '<td class="num" title="' + usedTitle + '">' + fmt(a.usedSeconds) + " / " + fmt(a.dailySeconds) + "</td>" +
+      '<td class="num"><b>' + fmt(a.remainingSeconds) + "</b></td>" +
+      '<td class="num">' + fmt(a.reserveSeconds) + "</td>" +
+      "<td>" + poolAccountStatus(a) + "</td>" +
+      '<td><div class="pool-actions">' +
+        '<button class="pool-mini" data-pool-act="check" data-name="' + esc(a.name) + '">轻检</button>' +
+        '<button class="pool-mini" data-pool-act="deepcheck" data-name="' + esc(a.name) + '">深检</button>' +
+        '<button class="pool-mini" data-pool-act="edit" data-name="' + esc(a.name) + '">编辑</button>' +
+        '<button class="pool-mini danger" data-pool-act="remove" data-name="' + esc(a.name) + '">移除</button>' +
+      "</div></td>" +
+      "</tr>";
+  }).join("");
+}
+
+function renderPoolTrend(trend) {
+  const el = document.getElementById("poolRiskTrend");
+  if (!trend.length) { el.innerHTML = '<div class="updated">暂无数据</div>'; return; }
+  const max = Math.max(1, ...trend.map(d => d.risk || 0));
+  el.innerHTML = trend.map(d => {
+    const risk = d.risk || 0, h = Math.max(2, Math.round((risk / max) * 56));
+    const calm = risk === 0 ? " calm" : "";
+    const tip = esc(d.day + " · 请求 " + d.total + " · 失败 " + d.fail + " · 风控 " + risk);
+    return '<div class="bar-col' + calm + '" title="' + tip + '"><i style="height:' + h + 'px"></i><small>' +
+      esc(String(d.day).slice(5)) + "</small></div>";
+  }).join("");
+}
+
+function renderPoolEvents(events) {
+  const el = document.getElementById("poolEvents");
+  if (!events.length) { el.innerHTML = '<div class="updated">暂无事件</div>'; return; }
+  el.innerHTML = events.map(ev => '<div class="ev"><b>' + esc((ev.time || "").slice(11, 19)) + "</b> " + esc(ev.text || "") + "</div>").join("");
+}
+
+function poolOutput(title, text) {
+  const el = document.getElementById("poolOutput");
+  el.classList.remove("hidden");
+  el.textContent = title + "\n" + (text || "");
+}
+function poolOutputHide() { document.getElementById("poolOutput").classList.add("hidden"); }
+
+async function poolToggleFailover() {
+  if (!poolState) return;
+  const on = !!(poolState.pool && poolState.pool.failoverEnabled);
+  const want = !on;
+  if (want && !confirm("开启后：小红书/抖音出现成簇风控时，会自动租一个爱加速节点换 IP 重试一次（消耗该账号的免费额度）。确认开启？")) return;
+  try {
+    await adminPost("/api/admin/pool/failover", { enabled: want });
+    showToast(want ? "兜底已开启（热生效）" : "兜底已关闭（热生效）");
+    await loadPool();
+  } catch (e) { showToast(e.message); }
+}
+
+async function poolCheckAll() { await poolCheck(""); }
+
+async function poolCheck(name) {
+  const label = name ? ("账号 " + name) : "全部账号";
+  poolOutput("正在轻检 " + label + "（验证登录 + 数免费节点，不占 1080、不耗额度）…", "");
+  try {
+    const r = await adminPost("/api/admin/pool/check", { name: name || "" });
+    poolOutput("轻检完成 · " + label, (r.lines || []).join("\n") || (r.ok ? "通过" : "见上"));
+    await loadPool();
+  } catch (e) { poolOutput("轻检失败", e.message); showToast(e.message); }
+}
+
+async function poolDeepCheck(name) {
+  const label = name || "自动挑选";
+  if (!confirm("深度体检会真租一个出口 IP（约 10~25s）并请求一次小红书，会占用 1080、消耗少量免费额度。继续？")) return;
+  poolOutput("正在深度体检 " + label + " …", "");
+  try {
+    const r = await adminPost("/api/admin/pool/deepcheck", { name: name || "" });
+    const res = r.result || {};
+    const lines = [];
+    if (res.account) lines.push("使用账号：" + res.account);
+    if (res.node) lines.push("使用节点：" + res.node);
+    if (res.directIp) lines.push("直连出口 IP：" + res.directIp);
+    if (res.exitIp) lines.push("代理出口 IP：" + res.exitIp + (res.ipChanged ? "（已切换 ✓）" : "（未切换 ✗）"));
+    if (res.probeCode !== undefined) {
+      lines.push("小红书探针：http=" + res.probeCode +
+        (res.probeLoginPage ? " · 跳登录页（该 IP 被标记）" : " · 未跳登录页") +
+        (res.probeHasInitialState ? " · 有初始状态 ✓" : " · 无初始状态 ✗"));
+    }
+    if (res.probeError) lines.push("探针异常：" + res.probeError);
+    if (res.elapsedSeconds !== undefined) lines.push("耗时：" + res.elapsedSeconds + "s");
+    lines.push("结论：" + (res.ok ? "该出口 IP 可正常访问小红书 ✓" : "未通过 —— " + (res.message || "见上")));
+    poolOutput("深度体检 · " + label + " · " + (res.ok ? "通过" : "未通过"), lines.join("\n"));
+    await loadPool();
+  } catch (e) { poolOutput("深度体检失败", e.message); showToast(e.message); }
+}
+
+function togglePoolEditor() {
+  const el = document.getElementById("poolCreator");
+  el.classList.toggle("hidden");
+  if (!el.classList.contains("hidden")) document.getElementById("pcUser").focus();
+}
+
+async function poolCreateAccount() {
+  const name = (document.getElementById("pcName").value || "").trim();
+  const user = (document.getElementById("pcUser").value || "").trim();
+  const password = document.getElementById("pcPassword").value || "";
+  const dailySeconds = parseInt(document.getElementById("pcDaily").value || "1200", 10);
+  const reserveSeconds = parseInt(document.getElementById("pcReserve").value || "0", 10);
+  const note = (document.getElementById("pcNote").value || "").trim();
+  if (!user || !password) { showToast("手机号和密码都不能为空"); return; }
+  const label = name || user;
+  poolOutput("正在登记 " + label + " 并验证登录 …", "");
+  try {
+    const r = await adminPost("/api/admin/pool/account", { name, user, password, dailySeconds, reserveSeconds, note });
+    const finalName = (r && r.name) || label;
+    ["pcName", "pcUser", "pcPassword", "pcNote"].forEach(id => { const e = document.getElementById(id); if (e) e.value = ""; });
+    document.getElementById("pcDaily").value = "1200";
+    document.getElementById("pcReserve").value = "0";
+    document.getElementById("poolCreator").classList.add("hidden");
+    showToast("账号 " + finalName + " 已登记并通过登录验证");
+    poolOutput("登记成功 · " + finalName, "登录验证通过。可用「深度体检」确认该账号的出口 IP 是否被小红书放行。");
+    await loadPool();
+  } catch (e) { poolOutput("登记失败 · " + label, e.message); showToast(e.message); }
+}
+
+function openAccountEdit(name) {
+  const a = ((poolState && poolState.pool && poolState.pool.accounts) || []).find(x => x.name === name);
+  if (!a) return;
+  document.getElementById("peName").textContent = name;
+  document.getElementById("peEnabled").checked = !!a.enabled;
+  document.getElementById("peDaily").value = a.dailySeconds;
+  document.getElementById("peReserve").value = a.reserveSeconds;
+  document.getElementById("peNote").value = a.note || "";
+  document.getElementById("pePassword").value = "";
+  document.getElementById("poolEditor").classList.remove("hidden");
+  document.getElementById("poolEditor").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function saveAccountEdit() {
+  const name = document.getElementById("peName").textContent;
+  const enabled = document.getElementById("peEnabled").checked;
+  const dailySeconds = parseInt(document.getElementById("peDaily").value || "1200", 10);
+  const reserveSeconds = parseInt(document.getElementById("peReserve").value || "0", 10);
+  const note = document.getElementById("peNote").value || "";
+  const password = document.getElementById("pePassword").value || "";
+  try {
+    await adminPost("/api/admin/pool/account/update", { name, enabled, dailySeconds, reserveSeconds, note });
+    if (password) {
+      const r = await adminPost("/api/admin/pool/account/password", { name, password });
+      showToast(r.message || "密码已更新");
+    } else {
+      showToast("已保存 " + name);
+    }
+    document.getElementById("poolEditor").classList.add("hidden");
+    await loadPool();
+  } catch (e) { showToast(e.message); }
+}
+
+async function poolRemoveAccount(name) {
+  if (!confirm("从池中移除账号「" + name + "」？将同时删除其配置文件 /etc/ajiasu-" + name + ".conf（不可恢复）。")) return;
+  try {
+    await adminPost("/api/admin/pool/account/remove", { name, deleteConfig: true });
+    showToast("已移除 " + name);
+    await loadPool();
+  } catch (e) { showToast(e.message); }
+}
+
+async function poolRelease() {
+  if (!confirm("释放当前租约？若此刻 1080 被签到轮换占用，池子会拒绝而不会抢占。")) return;
+  try { await adminPost("/api/admin/pool/release", {}); showToast("已释放"); await loadPool(); }
+  catch (e) { showToast(e.message); }
+}
+
+async function poolReap() {
+  try { await adminPost("/api/admin/pool/reap", {}); showToast("已回收超时租约"); await loadPool(); }
+  catch (e) { showToast(e.message); }
+}
+
+document.getElementById("poolBody").addEventListener("click", e => {
+  const btn = e.target.closest("[data-pool-act]");
+  if (!btn) return;
+  const act = btn.dataset.poolAct, name = btn.dataset.name;
+  if (act === "check") poolCheck(name);
+  else if (act === "deepcheck") poolDeepCheck(name);
+  else if (act === "edit") openAccountEdit(name);
+  else if (act === "remove") poolRemoveAccount(name);
+});
+
 document.getElementById("rangeSelect").onchange = loadAll;
+document.getElementById("trendMetric").onchange = () => loadAll();
+const NAV_TARGETS = { overview: "statusStrip", analysis: "errorList", realtime: "recentList", pool: "poolBody" };
+document.querySelectorAll(".nav-tab").forEach(tab => tab.addEventListener("click", () => { document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active")); tab.classList.add("active"); const anchor = document.getElementById(NAV_TARGETS[tab.dataset.view] || "statusStrip"); if (anchor) (anchor.closest(".dashboard-module") || anchor.closest(".card")).scrollIntoView({behavior:"smooth", block:"start"}); }));
+
+const LAYOUT_KEY = "link-extractor-admin-layout-v1";
+let layoutEditing = false, layoutSnapshot = null;
+const defaultLayout = ["status","alerts","metrics","performance","insights","devices","analysis","pool"];
+function layoutModules() { return [...document.querySelectorAll("#dashboardGrid > .dashboard-module")]; }
+function readLayout() { try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "null"); } catch (_) { return null; } }
+function saveLayout() { const data = layoutModules().map(m => ({id:m.dataset.module, size:m.classList.contains("half") ? "half" : m.classList.contains("third") ? "third" : "full", hidden:m.classList.contains("module-hidden")})); localStorage.setItem(LAYOUT_KEY, JSON.stringify(data)); }
+function applyLayout(data) { const grid=document.getElementById("dashboardGrid"); const map=Object.fromEntries(layoutModules().map(m=>[m.dataset.module,m])); (data || defaultLayout.map(id=>({id,size:"full",hidden:false}))).forEach(item => { const m=map[item.id]; if (!m) return; grid.appendChild(m); m.classList.remove("full","half","third","module-hidden"); m.classList.add(item.size || "full"); if (item.hidden) m.classList.add("module-hidden"); m.style.height=item.height || ""; }); }
+function addModuleActions() { layoutModules().forEach(m => { const a=m.querySelector(".module-actions"); if (a && !a.children.length) a.innerHTML='<button class="module-action" data-action="size">宽度</button><button class="module-action" data-action="auto">自适应</button><button class="module-action" data-action="hide">隐藏</button>'; if (!m.querySelector(".resize-hint")) { const hint=document.createElement("span"); hint.className="resize-hint"; hint.textContent="↘ 拖动调整高度"; m.appendChild(hint); } m.draggable=false; }); }
+function setEdit(on) { layoutEditing=on; document.getElementById("content").classList.toggle("editing",on); document.getElementById("editLayoutBtn").classList.toggle("hidden",on); document.getElementById("resetLayoutBtn").classList.toggle("hidden",!on); document.getElementById("saveLayoutBtn").classList.toggle("hidden",!on); document.getElementById("cancelLayoutBtn").classList.toggle("hidden",!on); document.getElementById("layoutState").textContent=on ? "编辑模式 · 拖动排序 / 尺寸 / 隐藏" : "查看模式 · 布局自动保存"; layoutModules().forEach(m=>m.draggable=on); setSubEditing(on); }
+
+function subModules() { return [...document.querySelectorAll(".insight-grid > .card, .bottom-grid > .card")]; }
+function initSubModules() { subModules().forEach((m,i) => { if (!m.dataset.submodule) m.dataset.submodule = (m.querySelector("h2")?.textContent || "组件").trim() + "-" + i; if (!m.querySelector(".submodule-head")) { const h=document.createElement("div"); h.className="submodule-head"; h.innerHTML='<span class="sub-drag">⠿</span><b>'+(m.querySelector("h2")?.textContent || "小组件")+'</b><span class="sub-actions"><button class="module-action" data-sub-action="hide">隐藏</button><button class="module-action" data-sub-action="auto">自适应</button></span>'; m.prepend(h); const r=document.createElement("span"); r.className="submodule-resize"; r.textContent="↘ 拖动调整"; m.appendChild(r); } }); }
+function setSubEditing(on) { subModules().forEach(m => m.draggable=on); }
+
+function initLayoutEditor() { addModuleActions(); initSubModules(); applyLayout(readLayout()); const grid=document.getElementById("dashboardGrid");
+  grid.addEventListener("pointerdown", e => { if(!layoutEditing || !e.target.classList.contains("resize-hint")) return; const m=e.target.closest(".dashboard-module"), startY=e.clientY, startH=m.getBoundingClientRect().height; m.setPointerCapture(e.pointerId); const move=ev => { const h=Math.max(120, Math.round(startH + ev.clientY-startY)); m.style.height=h+"px"; }; const up=()=>{ m.releasePointerCapture(e.pointerId); m.removeEventListener("pointermove",move); m.removeEventListener("pointerup",up); }; m.addEventListener("pointermove",move); m.addEventListener("pointerup",up); });
+  grid.addEventListener("dragstart",e=>{ if(!layoutEditing || !e.target.classList.contains("dashboard-module")) return; e.target.classList.add("dragging"); e.dataTransfer.effectAllowed="move"; }); grid.addEventListener("dragend",e=>e.target.classList.remove("dragging")); grid.addEventListener("dragover",e=>{ if(!layoutEditing) return; e.preventDefault(); const drag=grid.querySelector(".dragging"), over=e.target.closest(".dashboard-module"); if(drag && over && drag!==over){ const r=over.getBoundingClientRect(); grid.insertBefore(drag, e.clientY < r.top+r.height/2 ? over : over.nextSibling); }}); grid.addEventListener("click",e=>{ const btn=e.target.closest(".module-action"); if(!btn) return; const m=btn.closest(".dashboard-module"); if(btn.dataset.action==="hide") m.classList.add("module-hidden"); else if(btn.dataset.action==="auto") { m.style.height=""; m.style.minHeight=""; } else { const sizes=["full","half","third"]; const next=sizes[(sizes.indexOf(m.classList.contains("half")?"half":m.classList.contains("third")?"third":"full")+1)%3]; m.classList.remove("full","half","third"); m.classList.add(next); }}); grid.addEventListener("click", e => { const btn=e.target.closest("[data-sub-action]"); if(!btn || !layoutEditing) return; const m=btn.closest(".insight-grid > .card, .bottom-grid > .card"); if(btn.dataset.subAction==="hide") m.classList.add("module-hidden"); else m.style.height=""; });
+  document.querySelectorAll(".insight-grid, .bottom-grid").forEach(group => group.addEventListener("dragover", e => { if(!layoutEditing) return; const drag=group.querySelector(".dragging-sub"), over=e.target.closest(":scope > .card"); if(!drag || !over || drag===over) return; e.preventDefault(); const r=over.getBoundingClientRect(); group.insertBefore(drag,e.clientY<r.top+r.height/2?over:over.nextSibling); }));
+  subModules().forEach(m=>m.addEventListener("dragstart", e=>{ if(!layoutEditing) return; m.classList.add("dragging-sub"); })); subModules().forEach(m=>m.addEventListener("dragend", e=>m.classList.remove("dragging-sub")));
+  document.getElementById("editLayoutBtn").onclick=()=>{ layoutSnapshot=JSON.stringify(readLayout()); setEdit(true); }; document.getElementById("cancelLayoutBtn").onclick=()=>{ applyLayout(JSON.parse(layoutSnapshot)||null); setEdit(false); }; document.getElementById("saveLayoutBtn").onclick=()=>{ saveLayout(); setEdit(false); }; document.getElementById("resetLayoutBtn").onclick=()=>{ applyLayout(null); }; }
+initLayoutEditor();
 
 (async function init() {
   try {

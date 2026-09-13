@@ -21,8 +21,8 @@ import random
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
-import threading
 import time
 import uuid
 import csv
@@ -75,17 +75,6 @@ ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN", "")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 DEVICE_SECRET = _load_device_secret()
 
-# 运营公告：环境变量 ANNOUNCEMENT 配置（空串=无公告，前端不弹窗）。
-# 多行内容用字面 \n 分隔（env 文件里写 ANNOUNCEMENT=第一行\n第二行）。
-# ANNOUNCEMENT_ID 为公告标识（用于前端「已读 7 天」记忆）；不设置时按内容哈希生成，
-# 内容变更即视为新公告、用户会再次看到。
-ANNOUNCEMENT = os.environ.get("ANNOUNCEMENT", "").strip().replace("\\n", "\n")
-if ANNOUNCEMENT:
-    _announce_id = os.environ.get("ANNOUNCEMENT_ID", "").strip()
-    _ANNOUNCEMENT_ID = _announce_id if _announce_id else str(abs(hash(ANNOUNCEMENT)))
-else:
-    _ANNOUNCEMENT_ID = ""
-
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
     """读取受限整数环境变量，避免错误配置耗尽线程或触发平台风控。"""
@@ -98,7 +87,19 @@ def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int
 
 # 每个批次的外部平台请求并发数。默认 3，兼顾批量速度与平台风控风险。
 EXTRACT_CONCURRENCY = _bounded_int_env("EXTRACT_CONCURRENCY", 3, 1, 5)
-GLOBAL_EXTRACT_CONCURRENCY = _bounded_int_env("GLOBAL_EXTRACT_CONCURRENCY", 3, 1, 6)
+PEAK_EXTRACT_CONCURRENCY = _bounded_int_env("PEAK_EXTRACT_CONCURRENCY", 2, 1, 5)
+
+def _is_peak_calendar_window(now: datetime | None = None) -> bool:
+    """月底和月初自动进入保守并发模式，降低同一出口 IP 的突发请求密度。"""
+    current = now or datetime.now()
+    next_month = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days_in_month = (next_month - timedelta(days=1)).day
+    return current.day <= 5 or current.day > days_in_month - 5
+
+def _effective_extract_concurrency() -> int:
+    return min(EXTRACT_CONCURRENCY, PEAK_EXTRACT_CONCURRENCY) if _is_peak_calendar_window() else EXTRACT_CONCURRENCY
+
+GLOBAL_EXTRACT_CONCURRENCY = _bounded_int_env("GLOBAL_EXTRACT_CONCURRENCY", 2, 1, 6)
 _extract_queue = ThreadPoolExecutor(max_workers=GLOBAL_EXTRACT_CONCURRENCY, thread_name_prefix="extract")
 
 # ---------------------------------------------------------------- 日志
@@ -130,74 +131,6 @@ app = Flask(__name__, static_folder="app/static", static_url_path="/static")
 app.config["JSON_AS_ASCII"] = False
 app.config["MAX_CONTENT_LENGTH"] = 512 * 1024  # 请求体 512KB
 SERVICE_STARTED_AT = time.time()
-
-# ---------------------------------------------------------------- 失败负缓存
-
-# 同一 URL 提取失败后短期直接返回缓存结果，不再真实请求平台：
-# - 确定性错误（链接无效/凭证失效/缺 token/不支持的链接）缓存 10 分钟（重试无意义，需换新链接）
-# - 瞬时错误（触发验证/超时等）缓存 60 秒（可能稍后恢复，自动重试有机会成功）
-# - 前端手动「重试」传 force=true 绕过缓存，真实重新请求
-_FAIL_CACHE_TTL_DEFINITE = 600
-_FAIL_CACHE_TTL_TRANSIENT = 60
-_FAIL_CACHE_MAX = 500
-_TRANSIENT_KEYWORDS = ("触发验证", "请稍后重试", "未返回完整文案", "超时")
-_fail_cache: dict[str, tuple[float, str, str]] = {}  # url -> (expire_ts, error, hint)
-
-
-def _fail_cache_get(url: str):
-    """命中且未过期返回 (error, hint)，否则返回 None（顺带清理过期项）。"""
-    entry = _fail_cache.get(url)
-    if not entry:
-        return None
-    expire_ts, error, hint = entry
-    if time.time() < expire_ts:
-        return error, hint
-    _fail_cache.pop(url, None)
-    return None
-
-
-def _fail_cache_put(url: str, error: str, hint: str) -> None:
-    ttl = _FAIL_CACHE_TTL_TRANSIENT if any(k in error for k in _TRANSIENT_KEYWORDS) else _FAIL_CACHE_TTL_DEFINITE
-    _fail_cache[url] = (time.time() + ttl, error, hint)
-    # 防内存膨胀：先清过期，仍超限则淘汰最旧一半
-    if len(_fail_cache) > _FAIL_CACHE_MAX:
-        now = time.time()
-        for k, (expire_ts, _, _) in list(_fail_cache.items()):
-            if expire_ts <= now:
-                _fail_cache.pop(k, None)
-        if len(_fail_cache) > _FAIL_CACHE_MAX:
-            for k in sorted(_fail_cache, key=lambda u: _fail_cache[u][0])[: len(_fail_cache) // 2]:
-                _fail_cache.pop(k, None)
-
-
-# ---------------------------------------------------------------- 同 URL 请求冷却
-
-# 防止同一链接被疯狂重试：无论成败，同一 URL 在冷却期内只允许一次真实平台请求。
-# - 失败负缓存只拦「失败」链接；用户点「重试」传 force=true 绕过缓存后仍可能反复打平台
-# - 冷却独立于 force，冷却期内任何重试直接返回友好提示，不产生平台请求
-_URL_COOLDOWN_SECONDS = float(os.environ.get("URL_COOLDOWN_SECONDS", "30"))
-_url_cooldown: dict[str, float] = {}  # url -> 下次允许真实请求的时间戳
-_url_cooldown_lock = threading.Lock()
-
-
-def _url_cooldown_check(url: str) -> float:
-    """返回剩余冷却秒数（0 = 允许真实请求）；冷却期内拒绝并顺带清理过期项。
-
-    调用方可用返回值生成友好提示（如「请 X 秒后再试」），并把剩余秒数透传给前端，
-    让前端倒计时与后端冷却保持一致，避免「前端说可重试、后端仍拦截」的口径割裂。
-    """
-    now = time.time()
-    with _url_cooldown_lock:
-        allowed_at = _url_cooldown.get(url, 0.0)
-        if now < allowed_at:
-            return allowed_at - now
-        _url_cooldown[url] = now + _URL_COOLDOWN_SECONDS
-        if len(_url_cooldown) > 2000:  # 防内存膨胀：清理过期项
-            for k, v in list(_url_cooldown.items()):
-                if v <= now:
-                    _url_cooldown.pop(k, None)
-        return 0.0
-
 
 # ---------------------------------------------------------------- 请求日志
 
@@ -332,7 +265,7 @@ def _init_db():
                  "WHEN error LIKE '%不支持%' OR error LIKE '%xsec_token%' OR error LIKE '%作品 ID%' THEN 'invalid_input' "
                  "WHEN error LIKE '%失效%' OR error LIKE '%不存在%' THEN 'expired_content' "
                  "WHEN error LIKE '%风控%' OR error LIKE '%HTML%' OR error LIKE '%JSON%' OR error LIKE '%请求%' THEN 'upstream_error' "
-                 "ELSE 'internal_error' END WHERE status NOT IN ('success', 'blocked') AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
+                 "ELSE 'internal_error' END WHERE status != 'success' AND (outcome_class IS NULL OR outcome_class = '' OR outcome_class = 'success')")
     conn.execute("CREATE TABLE IF NOT EXISTS extract_cache (cache_key TEXT PRIMARY KEY, result_json TEXT NOT NULL, expires_at REAL NOT NULL, updated_at REAL NOT NULL)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_extract_cache_expiry ON extract_cache(expires_at)")
     conn.execute("CREATE TABLE IF NOT EXISTS admin_alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, message TEXT NOT NULL, value REAL DEFAULT 0, created_at TEXT NOT NULL)")
@@ -511,6 +444,52 @@ def api_health():
     return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat(), "uptime_seconds": round(time.time() - SERVICE_STARTED_AT)})
 
 
+@app.route("/api/like", methods=["POST"])
+def api_like():
+    """单链接真实点赞查询（标准 JSON，供自动化流程/飞书工作流调用）。
+
+    与 /api/extract 的 NDJSON 流式不同，本接口固定返回标准 JSON，
+    只提取 like_count 等核心字段，便于下游系统直接解析。
+    请求体：{"url": "https://..."}，支持传入单个链接或混合文本。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    # 无有效设备签名时跳过设备限速（防伪造设备每次换新绕过），仅靠 IP 限速兜底
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("url", "") or data.get("urls", "") or ""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    raw = str(raw).strip()
+    if not raw:
+        return jsonify({"success": False, "error": "请提供视频链接"}), 400
+
+    started_at = time.monotonic()
+    result = extract_link(raw)
+    if not result.success:
+        return jsonify({
+            "success": False,
+            "platform": result.platform_raw or "",
+            "error": result.error or "提取失败",
+            "hint": result.hint or "",
+            "fetch_ms": round((time.monotonic() - started_at) * 1000),
+        }), 200
+
+    return jsonify({
+        "success": True,
+        "like_count": result.like_count,
+        "platform": result.platform,
+        "platform_raw": result.platform_raw,
+        "post_id": result.post_id,
+        "canonical_url": result.canonical_url,
+        "author_name": result.author_name,
+        "publish_time": result.publish_time,
+        "fetch_ms": round((time.monotonic() - started_at) * 1000),
+    })
+
+
 @app.route("/api/extract", methods=["POST"])
 def api_extract():
     ip = request.remote_addr or "127.0.0.1"
@@ -521,7 +500,6 @@ def api_extract():
 
     data = request.get_json(silent=True) or {}
     raw = data.get("urls", "")
-    force = bool(data.get("force", False))  # 手动重试时强制绕过失败负缓存
     # 压测/诊断可显式关闭历史落库，避免把公开样本混入用户转换记录。
     # 未传该字段时仍按原行为保存，保持现有前端和统计逻辑不变。
     record_history = data.get("record_history") is not False
@@ -570,7 +548,7 @@ def api_extract():
                     device_id, item["original_url"], item["canonical_url"], item["platform"],
                     item["title"], item["caption"], item["author_name"], item["publish_time"],
                     item["like_count"], item["video_url"], item["cover_url"],
-                    item.get("status") or ("success" if item["success"] else "error"),
+                    "success" if item["success"] else "error",
                     item["error"] if not item["success"] else "",
                     item["duration_ms"], int(item["cache_hit"]), item["outcome_class"],
                     int((item.get("telemetry") or {}).get("retry_count") or 0),
@@ -587,55 +565,6 @@ def api_extract():
         """提取单条链接（带随机抖动，避免节奏规律触发风控）。"""
         started_at = time.monotonic()
         time.sleep(random.uniform(0, 0.5))
-
-        # 失败负缓存：同一 URL 短期内失败过 → 直接返回缓存结果，不再真实请求平台
-        # （防无效链接反复重试：既省平台请求、又降低风控触发概率）
-        if not force:
-            cached = _fail_cache_get(url)
-            if cached:
-                cached_error, cached_hint = cached
-                log.info("失败缓存命中，跳过平台请求: %s (%s)", url[:60], cached_error)
-                item = {
-                    "original_url": url,
-                    "success": False,
-                    "platform": "", "platform_raw": "",
-                    "title": "", "caption": "", "author_name": "",
-                    "publish_time": "", "like_count": 0,
-                    "video_url": "", "canonical_url": "", "cover_url": "",
-                    "post_id": "", "error": cached_error, "hint": cached_hint,
-                    "partial": False, "cache_hit": False, "telemetry": None,
-                    "cached_fail": True,
-                    "duration_ms": round((time.monotonic() - started_at) * 1000),
-                    "status": "blocked", "outcome_class": "blocked_cache",
-                }
-                if record_history:
-                    _save_to_db(item)
-                return item
-
-        # 同 URL 冷却：冷却期内拒绝真实请求（防同一链接疯狂重试；独立于 force，
-        # force 只绕过失败缓存，仍受冷却约束）
-        cooldown_left = _url_cooldown_check(url)
-        if cooldown_left > 0:
-            log.info("同 URL 冷却拦截: %s (%ds)", url[:60], int(cooldown_left) + 1)
-            item = {
-                "original_url": url,
-                "success": False,
-                "platform": "", "platform_raw": "",
-                "title": "", "caption": "", "author_name": "",
-                "publish_time": "", "like_count": 0,
-                "video_url": "", "canonical_url": "", "cover_url": "",
-                "post_id": "",
-                "error": f"该链接请求过于频繁，请 {int(cooldown_left) + 1} 秒后再试",
-                "hint": "同一链接短时间内只能提取一次，避免触发平台风控",
-                "partial": False, "cache_hit": False, "telemetry": None,
-                "cooldown": True, "cooldown_remaining": int(cooldown_left) + 1,
-                "duration_ms": round((time.monotonic() - started_at) * 1000),
-                "status": "blocked", "outcome_class": "blocked_cooldown",
-            }
-            if record_history:
-                _save_to_db(item)
-            return item
-
         result = extract_link(url)
         item = {
             "original_url": url,
@@ -670,8 +599,6 @@ def api_extract():
                      result.author_name or "-", result.like_count, elapsed_ms)
         else:
             log.warning("提取失败 [%s] 错误:%s (耗时:%.0fms)", url[:60], result.error, elapsed_ms)
-            # 写入失败负缓存（同 URL 短期重试直接命中，不再打平台）
-            _fail_cache_put(url, result.error, result.hint)
         if record_history:
             _save_to_db(item)
         return item
@@ -687,7 +614,8 @@ def api_extract():
         success_count = 0
         url_iter = iter(enumerate(urls))
         futures = {}
-        for _ in range(min(EXTRACT_CONCURRENCY, len(urls))):
+        batch_concurrency = _effective_extract_concurrency()
+        for _ in range(min(batch_concurrency, len(urls))):
             source_index, url = next(url_iter)
             futures[_extract_queue.submit(_process_one, url)] = (source_index, url)
         while futures:
@@ -735,7 +663,7 @@ def api_extract():
                 pass
         log.info(
             "批量提取完成: total=%d success=%d concurrency=%d elapsed=%.0fms",
-            len(urls), success_count, EXTRACT_CONCURRENCY,
+            len(urls), success_count, batch_concurrency,
             (time.monotonic() - batch_started_at) * 1000,
         )
         yield json.dumps({"type": "end", "done": done}, ensure_ascii=False) + "\n"
@@ -834,70 +762,6 @@ def api_stats():
     return jsonify(resp)
 
 
-@app.route("/api/notice", methods=["GET"])
-def api_notice():
-    """高峰/风控风险提示：实时计算全局近 5 分钟请求频率与失败率，返回风险等级。
-
-    - normal：一切正常（前端隐藏提示条）
-    - busy：请求量偏高（月底高峰多人同时使用），提示用户如遇失败稍后再试
-    - risk：失败率异常升高（疑似平台风控/限流），提示用户暂停操作、避免连续重试
-    判定基于全局 history（不按设备隔离，因为高峰/风控是全局现象），带轻量限速。
-    """
-    ip = request.remote_addr or "127.0.0.1"
-    if not _check_rate_limit(f"notice:{ip}", 30):
-        # 限速兜底：公告是静态低频数据，即使命中限速也应返回，避免用户错过公告
-        return jsonify({
-            "success": True,
-            "level": "normal",
-            "message": "",
-            "announcement": ANNOUNCEMENT,
-            "announcement_id": _ANNOUNCEMENT_ID,
-        }), 200
-
-    conn = _get_db()
-    try:
-        since = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-        # 排除 blocked 记录（失败缓存命中/冷却拦截是主动防护，不是平台真实失败，
-        # 若计入失败率会误报风控风险）
-        row = conn.execute(
-            """
-            SELECT COUNT(*) total,
-                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok
-            FROM history WHERE created_at >= ? AND status != 'blocked'
-            """,
-            (since,),
-        ).fetchone()
-        total = row["total"] or 0
-        ok = row["ok"] or 0
-        fail = total - ok
-        fail_rate = round(fail / total * 100, 1) if total else 0.0
-
-        # 风险等级判定（阈值按单服务 2 worker 的承载能力估算）
-        level, message = "normal", ""
-        if total >= 40 and fail_rate >= 50:
-            level = "risk"
-            message = "检测到平台访问受限，为避免触发风控，建议暂停 1 分钟再操作，或从 App 复制最新分享链接。"
-        elif total >= 40:
-            level = "busy"
-            message = "当前使用高峰，平台可能限流，如遇失败建议稍后再试。"
-        elif fail_rate >= 40 and total >= 10:
-            level = "risk"
-            message = "检测到提取失败率偏高，为避免触发风控，请间隔几秒再重试，或从 App 复制最新分享链接。"
-    finally:
-        conn.close()
-
-    return jsonify({
-        "success": True,
-        "level": level,
-        "message": message,
-        "announcement": ANNOUNCEMENT,
-        "announcement_id": _ANNOUNCEMENT_ID,
-        "window": "5m",
-        "total": total,
-        "fail_rate": fail_rate,
-    })
-
-
 # ---------------------------------------------------------------- 后台运营看板（管理员）
 
 def _admin_require_rate(ip: str) -> bool:
@@ -974,9 +838,7 @@ def api_admin_overview():
 
     window, days, since = _admin_window()
     conn = _get_db()
-    # 拦截记录（失败缓存命中/冷却拦截）用 status='blocked' 落库，属主动防护而非平台真实结果，
-    # 所有成功率/失败率/活跃设备统计统一排除，避免虚低成功率或误报风控；拦截量单独统计展示。
-    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)).fetchone()["c"]
+    total = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
     ok_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND status = 'success'", (since,)).fetchone()["c"]
     fail_count = total - ok_count
     user_error_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input', 'expired_content')", (since,)).fetchone()["c"]
@@ -984,35 +846,24 @@ def api_admin_overview():
     valid_total = total - user_error_count
     service_success_rate = round(ok_count / valid_total * 100, 1) if valid_total else 0
     input_validity_rate = round(valid_total / total * 100, 1) if total else 0
-    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)).fetchone()["c"]
+    active_devices = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)).fetchone()["c"]
 
     today_str = datetime.now().strftime("%Y-%m-%d")
-    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND status != 'blocked'", (today_str + "%",)).fetchone()["c"]
-    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
-    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
-
-    # ---- 防护拦截统计：失败缓存命中 / 冷却拦截（主动防护体系的工作量证明）----
-    blocked_cache_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'blocked_cache'", (since,)).fetchone()["c"] or 0
-    blocked_cooldown_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'blocked_cooldown'", (since,)).fetchone()["c"] or 0
-    blocked_total = blocked_cache_count + blocked_cooldown_count
+    today_count = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at LIKE ?", (today_str + "%",)).fetchone()["c"]
+    active_7d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
+    active_30d = conn.execute("SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", ((datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()["c"]
 
     platform_rows = conn.execute(
-        "SELECT CASE "
-        "WHEN platform IN ('抖音', 'douyin') THEN 'douyin' "
-        "WHEN platform IN ('小红书', 'xiaohongshu') THEN 'xiaohongshu' "
-        "ELSE platform END AS norm_platform, COUNT(*) c FROM history "
-        "WHERE created_at >= ? AND outcome_class = 'success' GROUP BY norm_platform", (since,)
+        "SELECT platform, COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' GROUP BY platform", (since,)
     ).fetchall()
     platform_dist = {}
     for row in platform_rows:
-        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["norm_platform"], row["norm_platform"] or "未知")
+        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
         platform_dist[name] = platform_dist.get(name, 0) + row["c"]
 
     platform_health = {}
     health_rows = conn.execute(
         "SELECT CASE "
-        "WHEN platform IN ('抖音', 'douyin') THEN 'douyin' "
-        "WHEN platform IN ('小红书', 'xiaohongshu') THEN 'xiaohongshu' "
         "WHEN platform != '' THEN platform "
         "WHEN lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%' THEN 'douyin' "
         "WHEN lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%' THEN 'xiaohongshu' "
@@ -1020,7 +871,7 @@ def api_admin_overview():
         "SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok, "
         "SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content') THEN 1 ELSE 0 END) user_errors, "
         "SUM(CASE WHEN outcome_class IN ('upstream_error','internal_error') THEN 1 ELSE 0 END) service_failures "
-        "FROM history WHERE created_at >= ? AND status != 'blocked' GROUP BY resolved_platform", (since,)
+        "FROM history WHERE created_at >= ? GROUP BY resolved_platform", (since,)
     ).fetchall()
     for row in health_rows:
         name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["resolved_platform"], row["resolved_platform"] or "未知")
@@ -1038,80 +889,24 @@ def api_admin_overview():
             "service_failures": row["service_failures"] or 0,
         }
 
-    # ---- 风控风险判定：平台失败率 + 疑似风控错误聚类 ----
-    risk = {"level": "ok", "title": "", "detail": "", "platforms": {}, "suspect_count": 0}
-    suspect_count = conn.execute(
-        """
-        SELECT COUNT(*) c FROM history WHERE created_at >= ?
-          AND outcome_class IN ('upstream_error', 'internal_error')
-          AND (lower(error) LIKE '%风控%' OR lower(error) LIKE '%限制访问%'
-               OR lower(error) LIKE '%验证%' OR lower(error) LIKE '%captcha%'
-               OR lower(error) LIKE '%challenge%' OR lower(error) LIKE '%暂时%')
-        """, (since,)
-    ).fetchone()["c"] or 0
-    risk["suspect_count"] = suspect_count
-    for name, h in platform_health.items():
-        if h["total"] < 5:  # 样本过少不判定
-            continue
-        plat_total = h["total"]
-        # 仅以服务失败占比判定（排除用户输入错误如乱粘链接/无效作品，避免把
-        # 「未知平台全是 invalid_input」误报为风控）；上游/内部错误才是风控信号。
-        svc_fail_rate = h["service_failures"] / plat_total * 100 if plat_total else 0
-        entry = {
-            "fail_rate": round(h["fail"] / plat_total * 100, 1) if plat_total else 0,
-            "service_failures": h["service_failures"],
-            "total": plat_total,
-        }
-        if svc_fail_rate >= 30:
-            risk["level"] = "risk"
-            risk["platforms"][name] = entry
-        elif svc_fail_rate >= 15:
-            if risk["level"] == "ok":
-                risk["level"] = "warn"
-            risk["platforms"][name] = entry
-    if risk["level"] != "ok" or suspect_count >= 10:
-        if risk["level"] == "ok":
-            risk["level"] = "warn"
-        names = "、".join(risk["platforms"]) or "平台"
-        risk["title"] = "平台风控或上游异常" if risk["level"] == "risk" else "平台波动预警"
-        risk["detail"] = f"近{window}内 {names} 失败率偏高（疑似风控/上游异常 {suspect_count} 条），建议关注服务器 IP 状态与平台策略。"
-    elif suspect_count >= 3:
-        risk["level"] = "warn"
-        risk["title"] = "疑似风控信号"
-        risk["detail"] = f"近{window}内检测到 {suspect_count} 条疑似风控错误，请关注平台状态。"
-
-    # ---- 趋势（含平台分线，一次分组查询）----
     trend = []
     today = datetime.now()
     points = 1 if days == 1 else days
-    day_rows = conn.execute(
-        """
-        SELECT substr(created_at, 1, 10) day,
-               COUNT(*) cnt,
-               SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) ok,
-               SUM(CASE WHEN platform IN ('douyin', '抖音')
-                     OR (platform = '' AND (lower(original_url) LIKE '%douyin%' OR lower(original_url) LIKE '%iesdouyin%'))
-                   THEN 1 ELSE 0 END) dy,
-               SUM(CASE WHEN platform IN ('xiaohongshu', '小红书')
-                     OR (platform = '' AND (lower(original_url) LIKE '%xiaohongshu%' OR lower(original_url) LIKE '%xhslink%'))
-                   THEN 1 ELSE 0 END) xhs
-        FROM history WHERE created_at >= ? AND status != 'blocked'
-        GROUP BY day
-        """, (since,)
-    ).fetchall()
-    day_map = {r["day"]: r for r in day_rows}
     for i in range(points - 1, -1, -1):
         day = today - timedelta(days=i)
-        r = day_map.get(day.strftime("%Y-%m-%d"))
-        cnt = r["cnt"] if r else 0
-        ok_cnt = r["ok"] if r else 0
+        day_str = day.strftime("%Y-%m-%d")
+        cnt = conn.execute(
+            "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ?", (day_str + "%", since)
+        ).fetchone()["c"]
+        ok_cnt = conn.execute(
+        "SELECT COUNT(*) c FROM history WHERE created_at LIKE ? AND created_at >= ? AND outcome_class = 'success'",
+            (day_str + "%", since),
+        ).fetchone()["c"]
         trend.append({
             "date": day.strftime("%m-%d"),
             "count": cnt,
             "ok": ok_cnt,
             "fail": cnt - ok_cnt,
-            "douyin": r["dy"] if r else 0,
-            "xiaohongshu": r["xhs"] if r else 0,
         })
     conn.close()
 
@@ -1126,16 +921,12 @@ def api_admin_overview():
         "input_validity_rate": input_validity_rate,
         "user_error_count": user_error_count,
         "service_failure_count": service_failure_count,
-        "blocked_total": blocked_total,
-        "blocked_cache": blocked_cache_count,
-        "blocked_cooldown": blocked_cooldown_count,
         "active_devices": active_devices,
         "active_devices_7d": active_7d,
         "active_devices_30d": active_30d,
         "today_count": today_count,
         "platform_dist": platform_dist,
         "platform_health": platform_health,
-        "risk": risk,
         "trend": trend,
     })
 
@@ -1155,7 +946,7 @@ def api_admin_devices():
         limit, offset = 50, 0
     conn = _get_db()
     total_devices = conn.execute(
-        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)
+        "SELECT COUNT(DISTINCT device_id) c FROM history WHERE created_at >= ?", (since,)
     ).fetchone()["c"]
     rows = conn.execute(
         """
@@ -1165,7 +956,7 @@ def api_admin_devices():
                MIN(created_at) AS first_at,
                MAX(created_at) AS last_at
         FROM history
-        WHERE created_at >= ? AND status != 'blocked'
+        WHERE created_at >= ?
         GROUP BY device_id
         ORDER BY total DESC
         LIMIT ? OFFSET ?
@@ -1208,58 +999,13 @@ def api_admin_errors():
     rows = conn.execute(
         """
         SELECT error, COUNT(*) c FROM history
-        WHERE created_at >= ? AND status NOT IN ('success', 'blocked') AND error != ''
+        WHERE created_at >= ? AND status != 'success' AND error != ''
         GROUP BY error ORDER BY c DESC LIMIT 30
         """, (since,)
     ).fetchall()
     conn.close()
     errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
     return jsonify({"success": True, "range": window, "errors": errors})
-
-
-@app.route("/api/admin/retry_hot", methods=["GET"])
-def api_admin_retry_hot():
-    """重试热点：同一链接被高频提交 TOP 20（URL 中段脱敏，不含分享凭证）。"""
-    ip = request.remote_addr or "127.0.0.1"
-    if not _admin_require_rate(ip):
-        return jsonify({"success": False, "error": "请求过于频繁"}), 429
-
-    window, _, since = _admin_window()
-    conn = _get_db()
-    rows = conn.execute(
-        """
-        SELECT original_url,
-               COUNT(*) c,
-               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) ok,
-               MAX(created_at) last_at
-        FROM history
-        WHERE created_at >= ? AND original_url != ''
-        GROUP BY original_url
-        ORDER BY c DESC LIMIT 20
-        """, (since,)
-    ).fetchall()
-    conn.close()
-
-    def _mask_url(url: str) -> str:
-        url = (url or "").strip()
-        if len(url) <= 60:
-            return url
-        return url[:30] + "..." + url[-20:]
-
-    items = []
-    for r in rows:
-        url = r["original_url"]
-        plat = "抖音" if ("douyin" in url or "iesdouyin" in url) else (
-            "小红书" if ("xiaohongshu" in url or "xhslink" in url) else "其他")
-        items.append({
-            "url": _mask_url(url),
-            "platform": plat,
-            "count": r["c"],
-            "ok": r["ok"] or 0,
-            "fail": r["c"] - (r["ok"] or 0),
-            "last_at": r["last_at"],
-        })
-    return jsonify({"success": True, "range": window, "items": items})
 
 
 @app.route("/api/admin/performance", methods=["GET"])
@@ -1271,16 +1017,16 @@ def api_admin_performance():
     window, _, since = _admin_window()
     conn = _get_db()
     row = conn.execute(
-        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ? AND status != 'blocked'", (since,)
+        "SELECT COUNT(*) total, AVG(duration_ms) avg_ms, SUM(cache_hit) cache_hits FROM history WHERE created_at >= ?", (since,)
     ).fetchone()
     durations = [r["duration_ms"] for r in conn.execute(
-        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 AND status != 'blocked' ORDER BY duration_ms", (since,)
+        "SELECT duration_ms FROM history WHERE created_at >= ? AND duration_ms > 0 ORDER BY duration_ms", (since,)
     ).fetchall()]
     total = row["total"] or 0
     hits = row["cache_hits"] or 0
     p95 = durations[max(0, (len(durations) * 95 + 99) // 100 - 1)] if durations else 0
-    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success' AND status != 'blocked'", (since,)).fetchone()["c"]
-    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content') AND status != 'blocked'", (since,)).fetchone()["c"]
+    current_ok = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class = 'success'", (since,)).fetchone()["c"]
+    user_errors = conn.execute("SELECT COUNT(*) c FROM history WHERE created_at >= ? AND outcome_class IN ('invalid_input','expired_content')", (since,)).fetchone()["c"]
     valid_total = total - user_errors
     service_failures = valid_total - current_ok
     retry_rows = conn.execute(
@@ -1318,12 +1064,32 @@ def api_admin_performance():
         "p95_duration_ms": round(p95),
         "cache_hits": hits,
         "cache_hit_rate": round(hits / total * 100, 1) if total else 0,
-        "batch_concurrency": EXTRACT_CONCURRENCY,
+        "batch_concurrency": _effective_extract_concurrency(),
         "queue_concurrency": GLOBAL_EXTRACT_CONCURRENCY,
         "douyin_retry_success_attempts": retry_success_attempts,
         "douyin_retry_reasons": retry_reasons,
     })
 
+
+@app.route("/api/admin/retry_hot", methods=["GET"])
+def api_admin_retry_hot():
+    """返回窗口内重复提交较多的链接，供运营看板定位重试热点。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+    _window, _days, since = _admin_window()
+    conn = _get_db()
+    rows = conn.execute(
+        """SELECT original_url AS url, MAX(platform) AS platform, COUNT(*) AS count,
+                  SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS ok,
+                  SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS fail,
+                  MAX(created_at) AS last_at
+           FROM history WHERE created_at >= ? GROUP BY original_url
+           HAVING COUNT(*) > 1 ORDER BY count DESC, last_at DESC LIMIT 50""",
+        (since,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"success": True, "items": [dict(row) for row in rows]})
 
 @app.route("/api/admin/recent", methods=["GET"])
 def api_admin_recent():
@@ -1391,6 +1157,348 @@ def api_admin_export_csv():
     response.headers["Content-Type"] = "text/csv; charset=utf-8"
     response.headers["Content-Disposition"] = "attachment; filename=link-extractor-report.csv"
     return response
+
+
+# ---------------------------------------------------------------- 代理池运维（管理员）
+
+POOL_BIN = os.environ.get("AJIASU_POOL_BIN", "/opt/ajiasu-pool/pool.py")
+POOL_PYTHON = os.environ.get("AJIASU_POOL_PYTHON", "/usr/bin/python3")
+POOL_CONFIG_PATH = Path(os.environ.get("AJIASU_POOL_CONFIG", "/opt/ajiasu-pool/pool-config.json"))
+POOL_LOG_PATH = Path("/var/log/ajiasu-pool.log")
+POOL_CMD_TIMEOUT = 180
+POOL_STATUS_TIMEOUT = 30
+_RISK_ERROR_MARKER = "平台暂时限制"
+
+
+def _parse_pool_json(raw):
+    """从代理池 CLI 输出里取出 JSON 对象。
+
+    pool.py 的 --json 有两种形态：`status` 用缩进多行、其余多为单行。
+    所以不能只按"单行 JSON"解析（曾经因此把 status 的整包 payload 丢掉，
+    面板只看到 success/error 两个键）。这里做三级回退：
+    整体解析 → 从最后一个行首为 '{' 的位置吃掉剩余内容 → 放弃。
+    """
+    text = (raw or "").strip()
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+    lines = (raw or "").splitlines()
+    decoder = json.JSONDecoder()
+    for i in range(len(lines) - 1, -1, -1):
+        if not lines[i].lstrip().startswith("{"):
+            continue
+        try:
+            obj, _end = decoder.raw_decode("\n".join(lines[i:]))
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def _pool_run(args, stdin_text="", timeout=POOL_CMD_TIMEOUT):
+    """调用代理池 CLI，取其中的 JSON 结果。
+
+    stdin_text 配合 pool.py 的 --pass-stdin 使用：密码走管道而不是命令行，
+    因此不会出现在 ps / 进程命令行里。
+    """
+    try:
+        proc = subprocess.run(
+            [POOL_PYTHON, POOL_BIN, *args],
+            input=stdin_text or None,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, {"success": False, "error": f"代理池调用失败：{exc}"}, ""
+    raw = proc.stdout or ""
+    payload = _parse_pool_json(raw)
+    if payload is None:
+        tail = raw.strip()[-400:]
+        return proc.returncode == 0, {
+            "success": proc.returncode == 0,
+            "error": "" if proc.returncode == 0 else (tail or "代理池未返回结果"),
+        }, raw
+    payload.setdefault("success", bool(payload.get("ok")))
+    return proc.returncode == 0, payload, raw
+
+
+def _read_pool_config() -> dict:
+    try:
+        data = json.loads(POOL_CONFIG_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _pool_recent_events(limit: int = 8) -> list:
+    """代理池日志里最近的事件（只留动作与出口 IP；日志本身不含密码）。"""
+    if not POOL_LOG_PATH.exists():
+        return []
+    try:
+        lines = POOL_LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in reversed(lines):
+        if "[pool]" not in line:
+            continue
+        body = line.split("[pool]", 1)[-1].strip()
+        if body.startswith(("建立租约", "释放租约", "换IP兜底开关")):
+            events.append({"time": line[:19], "text": body[:120]})
+            if len(events) >= limit:
+                break
+    return events
+
+
+def _risk_trend(days: int = 7) -> list:
+    """近 N 天平台风控失败趋势。
+
+    直接统计历史库，与兜底开关无关——所以「关上兜底」也能继续看到趋势，
+    这样判断「要不要再打开」靠数据而不是记性。
+    """
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT substr(created_at, 1, 10) AS day,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS fail,
+                   SUM(CASE WHEN error LIKE ? THEN 1 ELSE 0 END) AS risk
+            FROM history WHERE created_at >= ?
+            GROUP BY day ORDER BY day
+            """,
+            (f"%{_RISK_ERROR_MARKER}%", since),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{
+        "day": r["day"],
+        "total": r["total"] or 0,
+        "fail": r["fail"] or 0,
+        "risk": r["risk"] or 0,
+    } for r in rows]
+
+
+def _pool_precheck():
+    """代理池接口统一前置限速。返回 (ip, error_response)。"""
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return ip, (jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429)
+    return ip, None
+
+
+@app.route("/api/admin/pool/status", methods=["GET"])
+def api_admin_pool_status():
+    """代理池总览：账号额度记账 + 运行时状态 + 兜底开关 + 风控趋势 + 最近事件。"""
+    _ip, err = _pool_precheck()
+    if err:
+        return err
+    ok, payload, _raw = _pool_run(["status", "--json"], timeout=POOL_STATUS_TIMEOUT)
+    return jsonify({
+        "success": True,
+        "poolAvailable": ok,
+        "pool": payload,
+        "config": _read_pool_config(),
+        "recentEvents": _pool_recent_events(),
+        "riskTrend": _risk_trend(7),
+    })
+
+
+@app.route("/api/admin/pool/failover", methods=["POST"])
+def api_admin_pool_failover():
+    """热切换 5003 换 IP 兜底开关：写 pool-config.json，立刻生效、不重启 5003。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"success": False, "error": "enabled 必须是布尔值"}), 400
+    action = "on" if enabled else "off"
+    ok, payload, _raw = _pool_run(["failover", action, "--json"], timeout=20)
+    _admin_audit(f"pool-failover-{action}", ip)
+    if not ok or payload.get("failoverEnabled") != enabled:
+        return jsonify({"success": False, "error": payload.get("error") or "切换失败"}), 500
+    return jsonify({"success": True, "failoverEnabled": enabled})
+
+
+@app.route("/api/admin/pool/account", methods=["POST"])
+def api_admin_pool_add_account():
+    """新增爱加速账号。
+
+    密码只经由 POST body → 子进程 stdin，不写日志、不进进程命令行；
+    配置文件由 pool.py 以 0600 落盘。
+    """
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
+    user = str(body.get("user") or "").strip()
+    password = str(body.get("password") or "")
+    if not user or not password:
+        return jsonify({"success": False, "error": "手机号和密码都不能为空"}), 400
+    try:
+        daily = max(0, min(int(body.get("dailySeconds") or 1200), 24 * 3600))
+        reserve = max(0, min(int(body.get("reserveSeconds") or 0), 24 * 3600))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "额度必须是整数秒"}), 400
+    args = ["add-account", "--user", user, "--pass-stdin",
+            "--daily-seconds", str(daily), "--reserve-seconds", str(reserve)]
+    if name:
+        args += ["--name", name]
+    note = str(body.get("note") or "").strip()
+    if note:
+        args += ["--note", note]
+    ok, payload, _raw = _pool_run(args, stdin_text=password + "\n")
+    final_name = str(payload.get("name") or name or user)
+    _admin_audit(f"pool-add-account:{final_name}", ip)
+    if not ok:
+        return jsonify({"success": False, "error": payload.get("message") or payload.get("error") or "新增失败，请核对手机号与密码"}), 400
+    return jsonify({"success": True, "name": final_name})
+
+
+@app.route("/api/admin/pool/account/remove", methods=["POST"])
+def api_admin_pool_remove_account():
+    """从池中移除账号（可选同时删除其配置文件）。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
+    if not name:
+        return jsonify({"success": False, "error": "缺少账号名"}), 400
+    args = ["remove-account", "--name", name]
+    if body.get("deleteConfig"):
+        args.append("--delete-config")
+    ok, payload, _raw = _pool_run(args, timeout=30)
+    _admin_audit(f"pool-remove-account:{name}", ip)
+    if not ok:
+        return jsonify({"success": False, "error": payload.get("error") or "移除失败"}), 400
+    return jsonify({"success": True})
+
+
+@app.route("/api/admin/pool/account/update", methods=["POST"])
+def api_admin_pool_update_account():
+    """改账号非敏感项（启停 / 额度 / 预留 / 备注）。换手机号走新增，改密码走重置。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
+    if not name:
+        return jsonify({"success": False, "error": "缺少账号名"}), 400
+    args = ["update-account", "--name", name]
+    changed = []
+    if isinstance(body.get("enabled"), bool):
+        args += ["--enabled", "true" if body["enabled"] else "false"]
+        changed.append("enabled")
+    for key, flag in (("dailySeconds", "--daily-seconds"), ("reserveSeconds", "--reserve-seconds")):
+        if body.get(key) is not None:
+            try:
+                args += [flag, str(max(0, min(int(body[key]), 24 * 3600)))]
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "error": f"{key} 必须是整数秒"}), 400
+            changed.append(key)
+    if body.get("note") is not None:
+        args += ["--note", str(body["note"])[:120]]
+        changed.append("note")
+    if not changed:
+        return jsonify({"success": False, "error": "没有需要修改的字段"}), 400
+    ok, payload, _raw = _pool_run(args, timeout=30)
+    _admin_audit(f"pool-update-account:{name}:{','.join(changed)}", ip)
+    if not ok:
+        return jsonify({"success": False, "error": payload.get("error") or "更新失败"}), 400
+    return jsonify({"success": True, "account": payload.get("account")})
+
+
+@app.route("/api/admin/pool/account/password", methods=["POST"])
+def api_admin_pool_set_password():
+    """重置账号密码：新密码同样走 stdin，并立刻验证登录是否通过。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
+    password = str(body.get("password") or "")
+    if not name or not password:
+        return jsonify({"success": False, "error": "账号名与新密码都不能为空"}), 400
+    ok, payload, _raw = _pool_run(
+        ["set-password", "--name", name, "--pass-stdin"], stdin_text=password + "\n", timeout=90
+    )
+    _admin_audit(f"pool-set-password:{name}", ip)
+    return jsonify({
+        "success": bool(ok and payload.get("ok")),
+        "message": payload.get("message") or payload.get("error") or ("密码已更新" if ok else "重置失败"),
+    })
+
+
+@app.route("/api/admin/pool/release", methods=["POST"])
+def api_admin_pool_release():
+    """手动释放当前租约（会动 1080；被签到占用时 pool 侧会拒绝而不抢占）。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    ok, payload, _raw = _pool_run(["release", "--json"], timeout=30)
+    _admin_audit("pool-release", ip)
+    if not ok:
+        return jsonify({"success": False, "error": payload.get("error") or "释放失败"}), 400
+    return jsonify({"success": True, "result": payload})
+
+
+@app.route("/api/admin/pool/reap", methods=["POST"])
+def api_admin_pool_reap():
+    """清理超时/僵死租约（会动 1080）。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    ok, payload, _raw = _pool_run(["reap", "--json"], timeout=45)
+    _admin_audit("pool-reap", ip)
+    if not ok:
+        return jsonify({"success": False, "error": payload.get("error") or "回收失败"}), 400
+    return jsonify({"success": True, "result": payload})
+
+
+@app.route("/api/admin/pool/check", methods=["POST"])
+def api_admin_pool_check():
+    """轻检：验证账号登录 + 数免费节点。不占 1080、不耗额度，适合随时点。"""
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
+    args = ["check"] + (["--name", name] if name else [])
+    ok, _payload, raw = _pool_run(args, timeout=POOL_CMD_TIMEOUT)
+    _admin_audit(f"pool-check:{name or 'all'}", ip)
+    lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+    return jsonify({"success": True, "ok": ok, "lines": lines[-12:]})
+
+
+@app.route("/api/admin/pool/deepcheck", methods=["POST"])
+def api_admin_pool_deepcheck():
+    """深度体检：真租一个出口 IP、与直连对照、并用它请求一次小红书。
+
+    占 1080 几秒并消耗少量额度，所以做成独立按钮，不跟着列表轮询跑。
+    """
+    ip, err = _pool_precheck()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
+    args = ["deepcheck"] + (["--name", name] if name else [])
+    _ok, payload, _raw = _pool_run(args, timeout=POOL_CMD_TIMEOUT)
+    _admin_audit(f"pool-deepcheck:{name or 'auto'}", ip)
+    return jsonify({
+        "success": True,
+        "passed": bool(payload.get("ok")),
+        "result": payload,
+    })
 
 
 # ---------------------------------------------------------------- 封面代理

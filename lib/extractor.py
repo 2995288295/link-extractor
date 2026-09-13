@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import hashlib
 import json
@@ -18,6 +19,7 @@ import random
 import re
 import sqlite3
 import socket
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -37,19 +39,36 @@ _session_local = threading.local()
 
 
 def _new_session() -> requests.Session:
-    """创建独立会话；风控重试不能复用原会话的 Cookie。"""
+    """创建独立会话；风控重试不能复用原会话的 Cookie。
+
+    处于「爱加速换 IP 窗口」内时自动挂上代理出口（见 _current_proxy）。
+    """
     session = requests.Session()
     adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=0)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    proxy = _current_proxy()
+    if proxy:
+        session.proxies.update({"http": proxy, "https": proxy})
     return session
 
 
 def _get_session() -> requests.Session:
-    """每线程一个 Session（连接池复用），线程安全。"""
-    if not hasattr(_session_local, "session"):
-        _session_local.session = _new_session()
-    return _session_local.session
+    """每线程一个 Session（连接池复用），线程安全。
+
+    代理窗口开/关时切换会话，避免复用直连连接池导致请求绕过代理。
+    """
+    proxy = _current_proxy()
+    session = getattr(_session_local, "session", None)
+    if session is not None and getattr(_session_local, "session_proxy", "") != proxy:
+        with contextlib.suppress(Exception):
+            session.close()
+        session = None
+    if session is None:
+        session = _new_session()
+        _session_local.session = session
+        _session_local.session_proxy = proxy
+    return session
 
 
 # ---------------------------------------------------------------- 结果缓存
@@ -168,6 +187,21 @@ DOUYIN_ADAPTIVE_DELAY_MAX = 0.8
 XHS_HEADERS = {
     "User-Agent": DEFAULT_UA,
     "Accept": "text/html,*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://www.xiaohongshu.com/",
+}
+
+# 小红书分享短链（xhslink.cn）解析专用：移动端 UA + 完整浏览器头。
+# 2026-09-13 排查：短链解析若只带 User-Agent（缺 Accept/Accept-Language/Referer），
+# xhslink.cn 会 302 到 www.xiaohongshu.com/login?redirectPath=...，提取链路拿到 /login
+# 页面即报「小红书平台暂时限制访问」。实测同一时刻同 IP：仅 UA → 0/6，完整头 → 6/6。
+# 用户从 App 复制的链接本就是移动端分享链路，此处以移动端身份请求更贴近真实。
+XHS_SHARE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Referer": "https://www.xiaohongshu.com/",
 }
@@ -374,17 +408,32 @@ def _extract_xsec_token(url: str) -> Optional[str]:
 
 
 def _resolve_short_link(url: str) -> str:
-    """解析短链接：xhslink.cn / v.douyin.com → 最终 URL"""
-    if "xhslink" in url or "douyin" in url:
+    """解析短链接：xhslink.cn / v.douyin.com → 最终 URL
+
+    必须发送完整请求头：只带 User-Agent 会被 xhslink.cn 判为机器人并 302 到
+    /login（详见 XHS_SHARE_HEADERS 注释）。小红书先用完整桌面头，若仍被打回
+    /login 再换移动端分享头重试一次；抖音按其移动端头发送。
+    """
+    if "xhslink" in url:
+        candidates = (XHS_HEADERS, XHS_SHARE_HEADERS)
+    elif "douyin" in url:
+        candidates = (DOUYIN_MOBILE_HEADERS,)
+    else:
+        return url
+    for headers in candidates:
         try:
-            resp = _safe_get_with_redirects(
-                url, timeout=10, headers={"User-Agent": DEFAULT_UA}
-            )
-            if resp.url and resp.url != url:
-                logger.info("短链接已解析: %s → %s", url[:50], resp.url[:80])
-                return resp.url
+            resp = _safe_get_with_redirects(url, timeout=10, headers=headers)
         except Exception as e:
             logger.warning("短链接解析失败: %s", e)
+            continue
+        resolved = (resp.url or "").strip()
+        if not resolved or resolved == url:
+            continue
+        if urlparse(resolved).path.rstrip("/") == "/login":
+            logger.warning("短链解析被打回 /login，改用备用请求头重试: %s", url[:60])
+            continue
+        logger.info("短链接已解析: %s → %s", url[:50], resolved[:80])
+        return resolved
     return url
 
 
@@ -1009,7 +1058,16 @@ def _extract_xhs_with_retries(url: str, telemetry: dict[str, int]) -> dict[str, 
             last_error = ValueError("小红书页面暂未返回正文")
             logger.info("小红书第 %d 次请求拿到作品但正文为空", attempt)
         except XhsAccessDeniedError:
-            # 登录页/失效分享凭证不会因更换会话而恢复，立即反馈用户重新复制链接。
+            # 登录页大多是窗口式软限流（换出口 IP 能救）；但分享凭证失效也会跳登录页，
+            # 所以只在短期成簇风控时才换 IP，单条坏链接不浪费额度。
+            if _note_risk_failure("xiaohongshu"):
+                recovered = _xhs_via_failover(url, telemetry)
+                if recovered is not None:
+                    telemetry["xhs_attempt_count"] = attempt
+                    telemetry["xhs_success_attempt"] = attempt
+                    with _failover_lock:
+                        _risk_events.clear()
+                    return recovered
             raise
         except Exception as exc:
             request_ms += round((time.perf_counter() - started) * 1000)
@@ -1042,8 +1100,270 @@ def _extract_xhs_with_retries(url: str, telemetry: dict[str, int]) -> dict[str, 
         # 仅作为最终降级结果，让调用方保留可识别作品并提示稍后重试补文案。
         return last_data
     if last_error:
+        # meta 兜底同样会撞上登录页（此时上面那个分支没走到），成簇风控时也换一次 IP。
+        if _note_risk_failure("xiaohongshu"):
+            recovered = _xhs_via_failover(url, telemetry)
+            if recovered is not None:
+                telemetry["xhs_attempt_count"] = attempts + 1
+                telemetry["xhs_success_attempt"] = attempts + 1
+                with _failover_lock:
+                    _risk_events.clear()
+                return recovered
         raise last_error
     raise ValueError("小红书未返回可解析的作品信息")
+
+
+# ---------------------------------------------------------------- 爱加速换 IP 兜底
+# 背景：本机是云厂商固定出口 IP，小红书/抖音会对"短时间高频请求"打窗口式软限流
+# （笔记页被 302 到 /login、抖音返回验证页）。换一个国内住宅出口 IP 往往立刻恢复。
+#
+# 触发：同一平台在 RISK_WINDOW 秒内累计 RISK_THRESHOLD 次风控失败才动手，
+#       单条链接失效不会误触发，成簇爆发才换 IP。
+# 生效：向 /opt/ajiasu-pool 租一个「代理窗口」，窗口内该进程所有平台请求走代理，
+#       窗口结束自动释放并记账。免费额度有限，故用 窗口 + 熔断(最小间隔/每小时上限) 双重限制。
+#
+# 开关：优先读池级热配置 pool-config.json 的 failoverEnabled（用 `pool.py failover on|off`
+#       或 admin 面板改，立刻生效，不需要重启 5003）；没有该文件时回退到环境变量
+#       AJIASU_FAILOVER_ENABLED（默认 0=关）。
+# 让路：默认 08:00–08:25 是签到冻结窗口，窗口内一律不换 IP——1080 全机只有一条线路，
+#       抢用会打断 sheapi 签到轮换；宁可让这几分钟的风控失败照常报错。
+# 整套逻辑对原有链路零侵入：未开启 / 池子无额度 / 1080 被占用 时一律安静跳过，
+# 行为与改动前一致。
+
+AJIASU_FAILOVER_ENABLED = os.environ.get("AJIASU_FAILOVER_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+AJIASU_POOL_BIN = os.environ.get("AJIASU_POOL_BIN", "/opt/ajiasu-pool/pool.py")
+AJIASU_POOL_PYTHON = os.environ.get("AJIASU_POOL_PYTHON", "/usr/bin/python3")
+# 池级热配置：兜底开关（failoverEnabled）与签到冻结窗口（freezeStart/freezeEnd）都在这里。
+# 该文件存在时以它为准（改文件即生效，无需重启 5003）；不存在时回退到下面的环境变量。
+AJIASU_POOL_CONFIG = os.environ.get("AJIASU_POOL_CONFIG", "/opt/ajiasu-pool/pool-config.json")
+AJIASU_WINDOW_SECONDS = int(_float_env("AJIASU_FAILOVER_WINDOW", 60, 10, 600))
+AJIASU_MIN_INTERVAL = _float_env("AJIASU_FAILOVER_MIN_INTERVAL", 30, 0, 3600)
+AJIASU_MAX_PER_HOUR = int(_float_env("AJIASU_FAILOVER_MAX_PER_HOUR", 6, 0, 200))
+AJIASU_RISK_WINDOW = _float_env("AJIASU_FAILOVER_RISK_WINDOW", 90, 5, 3600)
+AJIASU_RISK_THRESHOLD = int(_float_env("AJIASU_FAILOVER_RISK_THRESHOLD", 2, 1, 50))
+AJIASU_POOL_TIMEOUT = _float_env("AJIASU_FAILOVER_POOL_TIMEOUT", 45, 5, 120)
+
+_RISK_CONTROL_MARKERS = ("平台暂时限制", "触发验证", "登录页")
+
+_failover_lock = threading.Lock()
+_failover_state: dict[str, Any] = {
+    "proxy": "", "active_until": 0.0, "lease_id": "", "account": "", "exit_ip": "", "timer": None,
+}
+_failover_history: list[float] = []
+_risk_events: list[float] = []
+
+
+def _current_proxy() -> str:
+    """当前是否处于代理窗口内；是则返回代理地址，否则空串。"""
+    state = _failover_state
+    if state["proxy"] and time.monotonic() < float(state["active_until"] or 0.0):
+        return str(state["proxy"])
+    return ""
+
+
+def _is_risk_control_error(exc: BaseException) -> bool:
+    if isinstance(exc, XhsAccessDeniedError):
+        return True
+    text = str(exc)
+    return any(marker in text for marker in _RISK_CONTROL_MARKERS)
+
+
+def _pool_config() -> dict[str, Any]:
+    """读取池级热配置；读不到就返回空字典（由调用方决定默认行为）。"""
+    try:
+        with open(AJIASU_POOL_CONFIG, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _failover_switch_on() -> bool:
+    """换 IP 兜底是否启用：热开关文件优先，读不到则回退到环境变量默认值。
+
+    热开关由 `pool.py failover on|off` 或 admin 面板写入，改完立刻生效——
+    gunicorn 不热加载，重启 5003 代价太大，开关不能做成需要重启的东西。
+    """
+    config = _pool_config()
+    if "failoverEnabled" in config:
+        return bool(config.get("failoverEnabled"))
+    return AJIASU_FAILOVER_ENABLED
+
+
+def _hhmm_to_minutes(value: Any, fallback: int) -> int:
+    """把 "HH:MM" 换成当天分钟数；解析失败回退默认值。"""
+    try:
+        hour, minute = str(value).split(":", 1)
+        total = int(hour) * 60 + int(minute)
+        if 0 <= total < 24 * 60:
+            return total
+    except (AttributeError, ValueError):
+        pass
+    return fallback
+
+
+def _in_freeze_window() -> bool:
+    """是否处于签到冻结窗口（默认 08:00–08:25）。
+
+    窗口内一律不换 IP：爱加速同一设备同时只能连一条线路，抢用会打断
+    sheapi 签到轮换。窗口与代理池共用同一份配置，默认宁可多让路几分钟。
+    """
+    start, end, enabled = 8 * 60, 8 * 60 + 25, True
+    config = _pool_config()
+    if config:
+        enabled = bool(config.get("freezeEnabled", True))
+        start = _hhmm_to_minutes(config.get("freezeStart"), start)
+        end = _hhmm_to_minutes(config.get("freezeEnd"), end)
+    if not enabled:
+        return False
+    now = time.localtime()
+    minutes = now.tm_hour * 60 + now.tm_min
+    return (start <= minutes < end) if start <= end else (minutes >= start or minutes < end)
+
+
+def _pool_call(args: list[str], timeout: Optional[float] = None) -> Optional[dict[str, Any]]:
+    """调用代理池 CLI，取最后一行 JSON。
+
+    这里刻意不做开关检查：release 必须永远能执行，否则「窗口开着时把开关关掉」
+    会让租约泄漏到超时。开关判断放在触发侧（_start_failover_window）。
+    """
+    try:
+        proc = subprocess.run(
+            [AJIASU_POOL_PYTHON, AJIASU_POOL_BIN, *args],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=timeout or AJIASU_POOL_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info("爱加速代理池调用异常 args=%s err=%s", args, exc)
+        return None
+    for line in reversed((proc.stdout or "").splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                return json.loads(stripped)
+            except ValueError:
+                continue
+    return None
+
+
+def _end_failover_window() -> None:
+    """代理窗口到期：释放租约，恢复直连。"""
+    with _failover_lock:
+        if not _failover_state["proxy"]:
+            return
+        timer = _failover_state.get("timer")
+        _failover_state.update({
+            "proxy": "", "active_until": 0.0, "lease_id": "",
+            "account": "", "exit_ip": "", "timer": None,
+        })
+    if timer is not None:
+        with contextlib.suppress(Exception):
+            timer.cancel()
+    result = _pool_call(["release", "--json"], timeout=20) or {}
+    logger.info("爱加速换 IP 窗口结束，已释放代理（%s）", result.get("state") or "unknown")
+
+
+def _start_failover_window(platform: str, rotate: bool = False) -> bool:
+    """开一个代理窗口；rotate=True 表示强制再换一个节点/出口 IP。"""
+    if not _failover_switch_on():
+        logger.info("跳过爱加速换 IP [%s]：热开关已关闭", platform)
+        return False
+    if _in_freeze_window():
+        logger.info(
+            "跳过爱加速换 IP [%s]：当前处于签到冻结窗口（默认 08:00–08:25），让路给签到轮换",
+            platform,
+        )
+        return False
+    if rotate:
+        _end_failover_window()
+    with _failover_lock:
+        if _current_proxy():
+            return True
+        now = time.monotonic()
+        _failover_history[:] = [t for t in _failover_history if t > now - 3600]
+        if len(_failover_history) >= AJIASU_MAX_PER_HOUR:
+            logger.info("跳过爱加速换 IP [%s]：本小时已达上限 %d 次", platform, AJIASU_MAX_PER_HOUR)
+            return False
+        if not rotate and _failover_history and now - _failover_history[-1] < AJIASU_MIN_INTERVAL:
+            logger.info("跳过爱加速换 IP [%s]：距上次不足 %.0fs", platform, AJIASU_MIN_INTERVAL)
+            return False
+        window = AJIASU_WINDOW_SECONDS
+        lease = _pool_call([
+            "acquire", "--json", "--rotate", "--ttl", str(window + 15),
+            "--reason", f"{platform}-risk",
+        ])
+        if not lease or not lease.get("ok") or not lease.get("proxy"):
+            logger.info(
+                "爱加速换 IP 未取到代理 [%s]：%s",
+                platform,
+                (lease or {}).get("message") or (lease or {}).get("state") or "pool-error",
+            )
+            return False
+        _failover_history.append(now)
+        _failover_state.update({
+            "proxy": str(lease["proxy"]),
+            "active_until": now + window,
+            "lease_id": str(lease.get("leaseId") or ""),
+            "account": str(lease.get("account") or ""),
+            "exit_ip": str(lease.get("exitIp") or ""),
+        })
+        timer = threading.Timer(window, _end_failover_window)
+        timer.daemon = True
+        _failover_state["timer"] = timer
+        timer.start()
+    logger.info(
+        "爱加速换 IP 生效 [%s]：account=%s node=%s exitIp=%s 窗口=%ss",
+        platform, lease.get("account"), lease.get("node"), lease.get("exitIp"), window,
+    )
+    return True
+
+
+def _note_risk_failure(platform: str) -> bool:
+    """记录一次风控失败；达到阈值就开代理窗口。返回当前是否有代理可用。"""
+    now = time.monotonic()
+    with _failover_lock:
+        _risk_events[:] = [t for t in _risk_events if t > now - AJIASU_RISK_WINDOW]
+        _risk_events.append(now)
+        streak = len(_risk_events)
+        if streak >= AJIASU_RISK_THRESHOLD:
+            _risk_events.clear()
+    if streak >= AJIASU_RISK_THRESHOLD:
+        _start_failover_window(platform)
+    return bool(_current_proxy())
+
+
+def _xhs_via_failover(url: str, telemetry: dict[str, int]) -> Optional[dict[str, Any]]:
+    """换 IP 后重试小红书。
+
+    免费节点是共享出口，偶尔会抽到已被平台标记的 IP（实测 10 个节点里 1 个脏），
+    因此仍被判限流时会再换一个节点重试一次，最后再走 meta 兜底。
+    """
+    telemetry["xhs_failover"] = 1
+    for attempt in (1, 2):
+        try:
+            data = _run_xhs_request(lambda: _extract_xhs_initial_state(url), telemetry)
+            if str(data.get("caption") or "").strip():
+                return data
+            return None
+        except XhsAccessDeniedError:
+            logger.info(
+                "小红书换 IP 第 %d 次仍被判限流（出口 %s）",
+                attempt, _failover_state.get("exit_ip") or "?",
+            )
+            if attempt == 2 or not _start_failover_window("xiaohongshu", rotate=True):
+                return None
+        except Exception as exc:  # noqa: BLE001 - 兜底链路，失败即回退原错误
+            logger.info("小红书换 IP 后 INITIAL_STATE 失败: %s", exc)
+            return None
+    try:
+        data = _run_xhs_request(lambda: _extract_xhs_lightweight(url), telemetry)
+        if str(data.get("caption") or "").strip():
+            return data
+    except Exception as exc:  # noqa: BLE001
+        logger.info("小红书换 IP 后 meta 兜底仍失败: %s", exc)
+    return None
 
 
 # ---------------------------------------------------------------- 汇总
@@ -1160,7 +1480,19 @@ def extract_link(raw: str) -> ExtractResult:
             data = _extract_xhs_with_retries(resolved, telemetry)
         else:
             external_started = time.perf_counter()
-            data = _extract_douyin(url, telemetry)
+            try:
+                data = _extract_douyin(url, telemetry)
+            except ValueError as exc:
+                # 抖音「触发验证」同样是出口 IP 被软限流：成簇出现时换 IP 再试一次。
+                if not _is_risk_control_error(exc) or not _note_risk_failure("douyin"):
+                    raise
+                try:
+                    data = _extract_douyin(url, telemetry)
+                    with _failover_lock:
+                        _risk_events.clear()
+                except Exception as retry_exc:  # noqa: BLE001 - 保留原始业务错误
+                    logger.info("抖音换 IP 重试仍失败: %s", retry_exc)
+                    raise exc
             telemetry["platform_total_ms"] = round((time.perf_counter() - external_started) * 1000)
 
         platform = data["platform"]
