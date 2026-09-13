@@ -1242,7 +1242,7 @@ def _parse_pool_json(raw):
 def _pool_run(args, stdin_text="", timeout=POOL_CMD_TIMEOUT):
     """调用代理池 CLI，取其中的 JSON 结果。
 
-    stdin_text 配合 pool.py 的 --pass-stdin 使用：口令走管道而不是命令行，
+    stdin_text 配合 pool.py 的 --pass-stdin 使用：密码走管道而不是命令行，
     因此不会出现在 ps / 进程命令行里。
     """
     try:
@@ -1275,7 +1275,7 @@ def _read_pool_config() -> dict:
 
 
 def _pool_recent_events(limit: int = 8) -> list:
-    """代理池日志里最近的事件（只留动作与出口 IP；日志本身不含口令）。"""
+    """代理池日志里最近的事件（只留动作与出口 IP；日志本身不含密码）。"""
     if not POOL_LOG_PATH.exists():
         return []
     try:
@@ -1371,7 +1371,7 @@ def api_admin_pool_failover():
 def api_admin_pool_add_account():
     """新增爱加速账号。
 
-    口令只经由 POST body → 子进程 stdin，不写日志、不进进程命令行；
+    密码只经由 POST body → 子进程 stdin，不写日志、不进进程命令行；
     配置文件由 pool.py 以 0600 落盘。
     """
     ip, err = _pool_precheck()
@@ -1381,23 +1381,26 @@ def api_admin_pool_add_account():
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
     user = str(body.get("user") or "").strip()
     password = str(body.get("password") or "")
-    if not name or not user or not password:
-        return jsonify({"success": False, "error": "账号名 / 手机号 / 口令 都不能为空"}), 400
+    if not user or not password:
+        return jsonify({"success": False, "error": "手机号和密码都不能为空"}), 400
     try:
         daily = max(0, min(int(body.get("dailySeconds") or 1200), 24 * 3600))
         reserve = max(0, min(int(body.get("reserveSeconds") or 0), 24 * 3600))
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "额度必须是整数秒"}), 400
-    args = ["add-account", "--name", name, "--user", user, "--pass-stdin",
+    args = ["add-account", "--user", user, "--pass-stdin",
             "--daily-seconds", str(daily), "--reserve-seconds", str(reserve)]
+    if name:
+        args += ["--name", name]
     note = str(body.get("note") or "").strip()
     if note:
         args += ["--note", note]
     ok, payload, _raw = _pool_run(args, stdin_text=password + "\n")
-    _admin_audit(f"pool-add-account:{name}", ip)
+    final_name = str(payload.get("name") or name or user)
+    _admin_audit(f"pool-add-account:{final_name}", ip)
     if not ok:
-        return jsonify({"success": False, "error": payload.get("message") or payload.get("error") or "新增失败，请核对手机号与口令"}), 400
-    return jsonify({"success": True, "name": name})
+        return jsonify({"success": False, "error": payload.get("message") or payload.get("error") or "新增失败，请核对手机号与密码"}), 400
+    return jsonify({"success": True, "name": final_name})
 
 
 @app.route("/api/admin/pool/account/remove", methods=["POST"])
@@ -1422,7 +1425,7 @@ def api_admin_pool_remove_account():
 
 @app.route("/api/admin/pool/account/update", methods=["POST"])
 def api_admin_pool_update_account():
-    """改账号非敏感项（启停 / 额度 / 预留 / 备注）。换手机号走新增，改口令走重置。"""
+    """改账号非敏感项（启停 / 额度 / 预留 / 备注）。换手机号走新增，改密码走重置。"""
     ip, err = _pool_precheck()
     if err:
         return err
@@ -1456,7 +1459,7 @@ def api_admin_pool_update_account():
 
 @app.route("/api/admin/pool/account/password", methods=["POST"])
 def api_admin_pool_set_password():
-    """重置账号口令：新口令同样走 stdin，并立刻验证登录是否通过。"""
+    """重置账号密码：新密码同样走 stdin，并立刻验证登录是否通过。"""
     ip, err = _pool_precheck()
     if err:
         return err
@@ -1464,14 +1467,14 @@ def api_admin_pool_set_password():
     name = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("name") or ""))
     password = str(body.get("password") or "")
     if not name or not password:
-        return jsonify({"success": False, "error": "账号名与新口令都不能为空"}), 400
+        return jsonify({"success": False, "error": "账号名与新密码都不能为空"}), 400
     ok, payload, _raw = _pool_run(
         ["set-password", "--name", name, "--pass-stdin"], stdin_text=password + "\n", timeout=90
     )
     _admin_audit(f"pool-set-password:{name}", ip)
     return jsonify({
         "success": bool(ok and payload.get("ok")),
-        "message": payload.get("message") or payload.get("error") or ("口令已更新" if ok else "重置失败"),
+        "message": payload.get("message") or payload.get("error") or ("密码已更新" if ok else "重置失败"),
     })
 
 

@@ -416,9 +416,9 @@ section.section-alerts { margin-bottom:16px; }
       <div id="poolCreator" class="pool-form hidden">
         <b>新增爱加速账号</b>
         <div class="pool-form-grid">
-          <label>账号名（字母/数字）<input id="pcName" placeholder="如 acc2"></label>
           <label>手机号<input id="pcUser" placeholder="登录爱加速的手机号"></label>
-          <label>口令<input id="pcPassword" type="password" placeholder="爱加速登录口令"></label>
+          <label>密码<input id="pcPassword" type="password" placeholder="爱加速登录密码"></label>
+          <label>账号名（可留空）<input id="pcName" placeholder="留空则用手机号"></label>
           <label>每日额度（秒）<input id="pcDaily" type="number" value="1200"></label>
           <label>预留（秒，留给签到）<input id="pcReserve" type="number" value="0"></label>
           <label>备注<input id="pcNote" placeholder="可选"></label>
@@ -426,7 +426,7 @@ section.section-alerts { margin-bottom:16px; }
         <div class="pool-form-actions">
           <button class="btn btn-primary" style="width:auto" onclick="poolCreateAccount()">登记并验证登录</button>
           <button class="btn btn-ghost" onclick="togglePoolEditor()">取消</button>
-          <span class="pool-warn">口令只写入本机 0600 配置文件、不落日志；但本面板目前是明文 HTTP，请勿在不可信网络下操作。</span>
+          <span class="pool-warn">密码只写入本机 0600 配置文件、不落日志；但本面板目前是明文 HTTP，请勿在不可信网络下操作。</span>
         </div>
       </div>
 
@@ -437,7 +437,7 @@ section.section-alerts { margin-bottom:16px; }
           <label>每日额度（秒）<input id="peDaily" type="number"></label>
           <label>预留（秒）<input id="peReserve" type="number"></label>
           <label>备注<input id="peNote"></label>
-          <label>重置口令（留空不改）<input id="pePassword" type="password"></label>
+          <label>重置密码（留空不改）<input id="pePassword" type="password"></label>
         </div>
         <div class="pool-form-actions">
           <button class="btn btn-primary" style="width:auto" onclick="saveAccountEdit()">保存</button>
@@ -982,7 +982,7 @@ async function poolDeepCheck(name) {
 function togglePoolEditor() {
   const el = document.getElementById("poolCreator");
   el.classList.toggle("hidden");
-  if (!el.classList.contains("hidden")) document.getElementById("pcName").focus();
+  if (!el.classList.contains("hidden")) document.getElementById("pcUser").focus();
 }
 
 async function poolCreateAccount() {
@@ -992,18 +992,20 @@ async function poolCreateAccount() {
   const dailySeconds = parseInt(document.getElementById("pcDaily").value || "1200", 10);
   const reserveSeconds = parseInt(document.getElementById("pcReserve").value || "0", 10);
   const note = (document.getElementById("pcNote").value || "").trim();
-  if (!name || !user || !password) { showToast("账号名 / 手机号 / 口令 都不能为空"); return; }
-  poolOutput("正在登记 " + name + " 并验证登录 …", "");
+  if (!user || !password) { showToast("手机号和密码都不能为空"); return; }
+  const label = name || user;
+  poolOutput("正在登记 " + label + " 并验证登录 …", "");
   try {
-    await adminPost("/api/admin/pool/account", { name, user, password, dailySeconds, reserveSeconds, note });
+    const r = await adminPost("/api/admin/pool/account", { name, user, password, dailySeconds, reserveSeconds, note });
+    const finalName = (r && r.name) || label;
     ["pcName", "pcUser", "pcPassword", "pcNote"].forEach(id => { const e = document.getElementById(id); if (e) e.value = ""; });
     document.getElementById("pcDaily").value = "1200";
     document.getElementById("pcReserve").value = "0";
     document.getElementById("poolCreator").classList.add("hidden");
-    showToast("账号 " + name + " 已登记并通过登录验证");
-    poolOutput("登记成功 · " + name, "登录验证通过。可用「深度体检」确认该账号的出口 IP 是否被小红书放行。");
+    showToast("账号 " + finalName + " 已登记并通过登录验证");
+    poolOutput("登记成功 · " + finalName, "登录验证通过。可用「深度体检」确认该账号的出口 IP 是否被小红书放行。");
     await loadPool();
-  } catch (e) { poolOutput("登记失败 · " + name, e.message); showToast(e.message); }
+  } catch (e) { poolOutput("登记失败 · " + label, e.message); showToast(e.message); }
 }
 
 function openAccountEdit(name) {
@@ -1030,7 +1032,7 @@ async function saveAccountEdit() {
     await adminPost("/api/admin/pool/account/update", { name, enabled, dailySeconds, reserveSeconds, note });
     if (password) {
       const r = await adminPost("/api/admin/pool/account/password", { name, password });
-      showToast(r.message || "口令已更新");
+      showToast(r.message || "密码已更新");
     } else {
       showToast("已保存 " + name);
     }
