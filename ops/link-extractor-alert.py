@@ -40,9 +40,16 @@ from datetime import datetime, timedelta
 
 CONF_PATH = os.environ.get("ALERT_CONF", "/etc/link-extractor-alert.env")
 STATE_FILE = os.environ.get("ALERT_STATE", "/var/lib/link-extractor-alert/state.json")
+TOKEN_CACHE = os.environ.get("ALERT_TOKEN_CACHE", "/var/lib/link-extractor-alert/feishu_token.json")
 
 DEFAULTS = {
-    # 飞书群机器人
+    # ── 飞书自建应用（推荐：能发私聊，7x24）──────────────────────────────
+    "FEISHU_APP_ID": "",
+    "FEISHU_APP_SECRET": "",
+    # 接收人：用户 open_id（ou_xxx）→ 私聊；或 chat_id（oc_xxx）→ 群。
+    # 注意 open_id 是「按应用」隔离的，换应用必须重新获取。
+    "FEISHU_RECEIVE_ID": "",
+    # ── 飞书群自定义机器人（备选：只能发群）──────────────────────────────
     "FEISHU_WEBHOOK_URL": "",
     "FEISHU_WEBHOOK_SECRET": "",  # 仅在机器人开启「签名校验」时填写
     # 数据源
@@ -384,35 +391,141 @@ def feishu_sign(secret: str, timestamp: str) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
-def post_feishu(cfg: dict, payload: dict) -> tuple[bool, str]:
-    webhook = (cfg.get("FEISHU_WEBHOOK_URL") or "").strip()
-    if not webhook:
-        return False, "未配置 FEISHU_WEBHOOK_URL"
-    body = dict(payload)
-    secret = (cfg.get("FEISHU_WEBHOOK_SECRET") or "").strip()
-    if secret:
-        ts = str(int(time.time()))
-        body["timestamp"] = ts
-        body["sign"] = feishu_sign(secret, ts)
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+def _http_post_json(url: str, body: dict, headers: dict | None = None) -> tuple[bool, object]:
+    hdrs = {"Content-Type": "application/json; charset=utf-8"}
+    if headers:
+        hdrs.update(headers)
     req = urllib.request.Request(
-        webhook, data=data,
-        headers={"Content-Type": "application/json; charset=utf-8"},
+        url,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers=hdrs,
         method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             text = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        return False, "HTTP {} {}".format(exc.code, detail)
     except Exception as exc:  # noqa: BLE001
-        return False, "推送异常: {}".format(exc)
+        return False, "请求异常: {}".format(exc)
     try:
-        result = json.loads(text)
+        return True, json.loads(text)
     except ValueError:
         return False, "返回非 JSON: {}".format(text[:200])
-    code = result.get("code", result.get("StatusCode", -1))
+
+
+def channel_configured(cfg: dict) -> bool:
+    app_ok = bool(
+        (cfg.get("FEISHU_APP_ID") or "").strip()
+        and (cfg.get("FEISHU_APP_SECRET") or "").strip()
+        and (cfg.get("FEISHU_RECEIVE_ID") or "").strip()
+    )
+    return app_ok or bool((cfg.get("FEISHU_WEBHOOK_URL") or "").strip())
+
+
+def get_tenant_token(cfg: dict) -> tuple[str, str]:
+    """取 tenant_access_token。有效期 2 小时，缓存到文件并提前 5 分钟刷新。"""
+    app_id = (cfg.get("FEISHU_APP_ID") or "").strip()
+    app_secret = (cfg.get("FEISHU_APP_SECRET") or "").strip()
+    if not app_id or not app_secret:
+        return "", "未配置 FEISHU_APP_ID / FEISHU_APP_SECRET"
+
+    try:
+        with open(TOKEN_CACHE, "r", encoding="utf-8") as fh:
+            cached = json.load(fh)
+        if cached.get("app_id") == app_id and float(cached.get("expire_at", 0)) > time.time() + 300:
+            return cached.get("token", ""), ""
+    except (OSError, ValueError):
+        pass
+
+    ok, result = _http_post_json(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        {"app_id": app_id, "app_secret": app_secret},
+    )
+    if not ok:
+        return "", "换 token 失败: {}".format(result)
+    if not isinstance(result, dict) or result.get("code") != 0:
+        return "", "换 token 被拒: {}".format(str(result)[:200])
+
+    token = result.get("tenant_access_token", "")
+    expire = int(result.get("expire", 7200) or 7200)
+    try:
+        os.makedirs(os.path.dirname(TOKEN_CACHE), exist_ok=True)
+        with open(TOKEN_CACHE, "w", encoding="utf-8") as fh:
+            json.dump({"app_id": app_id, "token": token, "expire_at": time.time() + expire}, fh)
+        os.chmod(TOKEN_CACHE, 0o600)
+    except OSError:
+        pass
+    return token, ""
+
+
+def send_via_app(cfg: dict, card: dict) -> tuple[bool, str]:
+    """以应用身份发消息：ou_xxx → 私聊，oc_xxx → 群。"""
+    token, err = get_tenant_token(cfg)
+    if not token:
+        return False, err
+    receive_id = (cfg.get("FEISHU_RECEIVE_ID") or "").strip()
+    id_type = "chat_id" if receive_id.startswith("oc_") else "open_id"
+    url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={}".format(id_type)
+    body = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False),
+    }
+    ok, result = _http_post_json(url, body, {"Authorization": "Bearer {}".format(token)})
+    if not ok:
+        return False, str(result)
+    if isinstance(result, dict) and result.get("code") == 0:
+        return True, ""
+    return False, "发消息被拒: {}".format(str(result)[:220])
+
+
+def send_via_webhook(cfg: dict, card: dict) -> tuple[bool, str]:
+    webhook = (cfg.get("FEISHU_WEBHOOK_URL") or "").strip()
+    if not webhook:
+        return False, "未配置 FEISHU_WEBHOOK_URL"
+    body = {"msg_type": "interactive", "card": card}
+    secret = (cfg.get("FEISHU_WEBHOOK_SECRET") or "").strip()
+    if secret:
+        ts = str(int(time.time()))
+        body["timestamp"] = ts
+        body["sign"] = feishu_sign(secret, ts)
+    ok, result = _http_post_json(webhook, body)
+    if not ok:
+        return False, str(result)
+    code = result.get("code", result.get("StatusCode", -1)) if isinstance(result, dict) else -1
     if code == 0:
         return True, ""
-    return False, "飞书返回: {}".format(text[:200])
+    return False, "飞书返回: {}".format(str(result)[:200])
+
+
+def send_message(cfg: dict, card: dict) -> tuple[bool, str]:
+    """优先走应用通道（可私聊）；配了 webhook 则作为回退。"""
+    app_ok = bool(
+        (cfg.get("FEISHU_APP_ID") or "").strip()
+        and (cfg.get("FEISHU_APP_SECRET") or "").strip()
+        and (cfg.get("FEISHU_RECEIVE_ID") or "").strip()
+    )
+    webhook_ok = bool((cfg.get("FEISHU_WEBHOOK_URL") or "").strip())
+
+    if app_ok:
+        ok, err = send_via_app(cfg, card)
+        if ok:
+            return True, ""
+        if webhook_ok:
+            ok2, err2 = send_via_webhook(cfg, card)
+            if ok2:
+                return True, ""
+            return False, "应用通道失败（{}）；回退 webhook 也失败（{}）".format(err, err2)
+        return False, err
+    if webhook_ok:
+        return send_via_webhook(cfg, card)
+    return False, "未配置任何飞书通道"
 
 
 def build_alert_card(issues: dict, win: int) -> dict:
@@ -440,16 +553,13 @@ def build_alert_card(issues: dict, win: int) -> dict:
     if n_critical:
         headline = "🔴 链接提取 5003 · {} 项异常（{} 项严重）".format(len(issues), n_critical)
     return {
-        "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"template": worst, "title": {"tag": "plain_text", "content": headline}},
-            "elements": elements + [{
-                "tag": "note",
-                "elements": [{"tag": "plain_text", "content": "巡检时间 {} · 统计窗口近 {} 分钟".format(
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"), win)}],
-            }],
-        },
+        "config": {"wide_screen_mode": True},
+        "header": {"template": worst, "title": {"tag": "plain_text", "content": headline}},
+        "elements": elements + [{
+            "tag": "note",
+            "elements": [{"tag": "plain_text", "content": "巡检时间 {} · 统计窗口近 {} 分钟".format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), win)}],
+        }],
     }
 
 
@@ -462,21 +572,18 @@ def build_recovery_card(recovered: list[str], stats: dict, win: int) -> dict:
         ("当前成功率", "{}%（{} 样本）".format(stats.get("service_success_rate", "-"), stats.get("valid_total", 0))),
     ]
     return {
-        "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "green", "title": {"tag": "plain_text", "content": "✅ 链接提取 5003 · 已恢复"}},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
-                {"tag": "hr"},
-                {"tag": "div", "fields": [
-                    {"is_short": True, "text": {"tag": "lark_md", "content": "**{}**\n{}".format(k, v)}}
-                    for k, v in fields
-                ]},
-                {"tag": "note", "elements": [{"tag": "plain_text", "content": "恢复时间 {} · 统计窗口近 {} 分钟".format(
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"), win)}]},
-            ],
-        },
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "green", "title": {"tag": "plain_text", "content": "✅ 链接提取 5003 · 已恢复"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}},
+            {"tag": "hr"},
+            {"tag": "div", "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": "**{}**\n{}".format(k, v)}}
+                for k, v in fields
+            ]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "恢复时间 {} · 统计窗口近 {} 分钟".format(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), win)}]},
+        ],
     }
 
 
@@ -509,10 +616,10 @@ def run(dry_run: bool = False) -> int:
     win = cfg_int(cfg, "ALERT_WINDOW_MINUTES")
     repeat_minutes = cfg_int(cfg, "ALERT_REPEAT_MINUTES")
 
-    # webhook 未配置时整轮跳过，且不落状态 —— 否则等配置补齐后，
+    # 未配置任何飞书通道时整轮跳过，且不落状态 —— 否则等配置补齐后，
     # 已在发生的故障会被上一条「静默期记录」挡住最长 ALERT_REPEAT_MINUTES 分钟。
-    if not dry_run and not (cfg.get("FEISHU_WEBHOOK_URL") or "").strip():
-        print("未配置 FEISHU_WEBHOOK_URL，跳过本轮巡检（不落状态）")
+    if not dry_run and not channel_configured(cfg):
+        print("未配置飞书通道（应用或 webhook），跳过本轮巡检（不落状态）")
         return 0
 
     state = load_state()
@@ -557,15 +664,11 @@ def run(dry_run: bool = False) -> int:
 
     sent_any = False
     if to_notify:
-        payload = build_alert_card(to_notify, win)
-        ok, err = post_feishu(cfg, payload)
+        ok, err = send_message(cfg, build_alert_card(to_notify, win))
         sent_any = sent_any or ok
         print("  推送告警 {} 项: {}".format(len(to_notify), "成功" if ok else "失败 -> " + err))
-        if not ok and "未配置" in err:
-            # 未配置 webhook 时仍记录状态，避免恢复通知逻辑错乱
-            pass
     if recovered:
-        ok, err = post_feishu(cfg, build_recovery_card(recovered, stats, win))
+        ok, err = send_message(cfg, build_recovery_card(recovered, stats, win))
         sent_any = sent_any or ok
         print("  推送恢复 {} 项: {}".format(len(recovered), "成功" if ok else "失败 -> " + err))
 
@@ -587,35 +690,94 @@ def run(dry_run: bool = False) -> int:
     return 0
 
 
+def channel_label(cfg: dict) -> str:
+    app_ok = bool(
+        (cfg.get("FEISHU_APP_ID") or "").strip()
+        and (cfg.get("FEISHU_APP_SECRET") or "").strip()
+        and (cfg.get("FEISHU_RECEIVE_ID") or "").strip()
+    )
+    if not app_ok:
+        return "群机器人 webhook"
+    return "飞书应用 · 群" if (cfg.get("FEISHU_RECEIVE_ID") or "").strip().startswith("oc_") else "飞书应用 · 私聊"
+
+
 def send_test(cfg: dict) -> int:
     stats = collect_stats(cfg["DB_PATH"], cfg_int(cfg, "ALERT_WINDOW_MINUTES"))
     healthy, health_err = check_health(cfg["ADMIN_BASE_URL"])
+    channel = channel_label(cfg)
     card = {
-        "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {"template": "blue", "title": {"tag": "plain_text", "content": "🔔 链接提取 5003 · 告警通道测试"}},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": "**通道已打通**。后续 5003 出现服务不可用、成功率跌破阈值、平台级异常或响应变慢时，会自动推送到这里。"}},
-                {"tag": "hr"},
-                {"tag": "div", "fields": [
-                    {"is_short": True, "text": {"tag": "lark_md", "content": "**服务状态**\n{}".format("正常" if healthy else "异常: " + health_err[:60])}},
-                    {"is_short": True, "text": {"tag": "lark_md", "content": "**近 {} 分钟成功率**\n{}%（{} 样本）".format(
-                        cfg_int(cfg, "ALERT_WINDOW_MINUTES"), stats.get("service_success_rate", "-"), stats.get("valid_total", 0))}},
-                ]},
-                {"tag": "note", "elements": [{"tag": "plain_text", "content": "测试时间 {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}]},
-            ],
-        },
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue", "title": {"tag": "plain_text", "content": "🔔 链接提取 5003 · 告警通道测试"}},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md", "content": "**通道已打通。** 后续 5003 出现服务不可用、成功率跌破阈值、平台级异常或响应变慢时，会自动推送到这里。"}},
+            {"tag": "hr"},
+            {"tag": "div", "fields": [
+                {"is_short": True, "text": {"tag": "lark_md", "content": "**推送通道**\n{}".format(channel)}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": "**服务状态**\n{}".format("正常" if healthy else "异常：" + health_err[:60])}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": "**近 {} 分钟成功率**\n{}%（{} 样本）".format(
+                    cfg_int(cfg, "ALERT_WINDOW_MINUTES"), stats.get("service_success_rate", "-"), stats.get("valid_total", 0))}},
+                {"is_short": True, "text": {"tag": "lark_md", "content": "**统计窗口**\n近 {} 分钟".format(cfg_int(cfg, "ALERT_WINDOW_MINUTES"))}},
+            ]},
+            {"tag": "note", "elements": [{"tag": "plain_text", "content": "测试时间 {}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}]},
+        ],
     }
-    ok, err = post_feishu(cfg, card)
+    ok, err = send_message(cfg, card)
     if ok:
-        print("测试消息已发送，去飞书群里看看。")
+        print("测试消息已发送（{}），去飞书里看看。".format(channel))
         return 0
     print("发送失败: {}".format(err))
     return 1
 
 
+def resolve_open_id(cfg: dict, argv: list[str]) -> int:
+    """用手机号或邮箱换 open_id（open_id 按应用隔离，换应用必须重查）。"""
+    mobile = email = ""
+    for i, a in enumerate(argv):
+        if a == "--mobile" and i + 1 < len(argv):
+            mobile = argv[i + 1]
+        elif a == "--email" and i + 1 < len(argv):
+            email = argv[i + 1]
+    if not mobile and not email:
+        print("用法: link-extractor-alert.py --resolve-openid --mobile 138xxxx 或 --email a@b.com")
+        return 2
+
+    token, err = get_tenant_token(cfg)
+    if not token:
+        print("取 token 失败: {}".format(err))
+        return 1
+
+    body: dict = {}
+    if mobile:
+        body["mobiles"] = [mobile]
+    if email:
+        body["emails"] = [email]
+    ok, result = _http_post_json(
+        "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id",
+        body,
+        {"Authorization": "Bearer {}".format(token)},
+    )
+    if not ok:
+        print("查询失败: {}".format(result))
+        return 1
+    if not isinstance(result, dict) or result.get("code") != 0:
+        print("查询被拒（多半是缺 contact:user.id:readonly 权限）: {}".format(str(result)[:300]))
+        return 1
+    users = (result.get("data") or {}).get("user_list") or []
+    found = False
+    for u in users:
+        oid = u.get("user_id") or ""
+        if oid:
+            found = True
+            print("open_id = {}".format(oid))
+    if not found:
+        print("没有查到对应账号（确认手机号/邮箱与飞书账号一致，且该用户在本应用可用范围内）")
+        return 1
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if "--resolve-openid" in argv or "--resolve_openid" in argv:
+        return resolve_open_id(load_config(), argv)
     if "--test" in argv:
         return send_test(load_config())
     return run(dry_run="--dry-run" in argv or "--dry_run" in argv)
