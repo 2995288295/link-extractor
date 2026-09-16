@@ -1372,6 +1372,16 @@ AJIASU_RISK_WINDOW = _float_env("AJIASU_FAILOVER_RISK_WINDOW", 90, 5, 3600)
 AJIASU_RISK_THRESHOLD = int(_float_env("AJIASU_FAILOVER_RISK_THRESHOLD", 2, 1, 50))
 AJIASU_POOL_TIMEOUT = _float_env("AJIASU_FAILOVER_POOL_TIMEOUT", 45, 5, 120)
 
+# 「持续限流」升级档。短档只解决零星软限流（换一次 IP、握 60s 就好）；
+# 但限流若是**持续**的（例如换到的节点出口也被标记），短窗口一到期就回直连、又被限制，
+# 于是「失败 → 告警 → 自愈 → 再失败」来回抖，把告警打爆。
+# 判据：AJIASU_ESCALATE_RISK_WINDOW（默认 300s = 「5 分钟内没缓解」）内风控次数
+# 达到 AJIASU_ESCALATE_THRESHOLD（默认 3）→ 强制再换一个出口 IP，并把代理窗口
+# 拉到 AJIASU_ESCALATE_HOLD（默认 300s），先把这波限流熬过去。
+AJIASU_ESCALATE_RISK_WINDOW = _float_env("AJIASU_FAILOVER_ESCALATE_RISK_WINDOW", 300, 30, 3600)
+AJIASU_ESCALATE_THRESHOLD = int(_float_env("AJIASU_FAILOVER_ESCALATE_THRESHOLD", 3, 2, 100))
+AJIASU_ESCALATE_HOLD = _float_env("AJIASU_FAILOVER_ESCALATE_HOLD", 300, 30, 900)
+
 _RISK_CONTROL_MARKERS = ("平台暂时限制", "触发验证", "登录页")
 
 _failover_lock = threading.Lock()
@@ -1380,6 +1390,7 @@ _failover_state: dict[str, Any] = {
 }
 _failover_history: list[float] = []
 _risk_events: list[float] = []
+_risk_events_long: list[float] = []  # 长窗口（默认 300s）内的风控时刻，用于判定「持续未缓解」
 
 
 def _current_proxy() -> str:
@@ -1492,8 +1503,12 @@ def _end_failover_window() -> None:
     logger.info("爱加速换 IP 窗口结束，已释放代理（%s）", result.get("state") or "unknown")
 
 
-def _start_failover_window(platform: str, rotate: bool = False) -> bool:
-    """开一个代理窗口；rotate=True 表示强制再换一个节点/出口 IP。"""
+def _start_failover_window(platform: str, rotate: bool = False, window: Optional[float] = None) -> bool:
+    """开一个代理窗口；rotate=True 表示强制再换一个节点/出口 IP。
+
+    window 不给就用默认短窗口 AJIASU_WINDOW_SECONDS；「持续限流升级档」会传更长的值，
+    把窗口拉长到能熬过这一波限流，避免短窗口到期即回直连、又被限制地来回抖动。
+    """
     if not _failover_switch_on():
         logger.info("跳过爱加速换 IP [%s]：热开关已关闭", platform)
         return False
@@ -1516,9 +1531,9 @@ def _start_failover_window(platform: str, rotate: bool = False) -> bool:
         if not rotate and _failover_history and now - _failover_history[-1] < AJIASU_MIN_INTERVAL:
             logger.info("跳过爱加速换 IP [%s]：距上次不足 %.0fs", platform, AJIASU_MIN_INTERVAL)
             return False
-        window = AJIASU_WINDOW_SECONDS
+        window = float(window or AJIASU_WINDOW_SECONDS)
         lease = _pool_call([
-            "acquire", "--json", "--rotate", "--ttl", str(window + 15),
+            "acquire", "--json", "--rotate", "--ttl", str(int(window) + 15),
             "--reason", f"{platform}-risk",
         ])
         if not lease or not lease.get("ok") or not lease.get("proxy"):
@@ -1548,7 +1563,15 @@ def _start_failover_window(platform: str, rotate: bool = False) -> bool:
 
 
 def _note_risk_failure(platform: str) -> bool:
-    """记录一次风控失败；达到阈值就开代理窗口。返回当前是否有代理可用。"""
+    """记录一次风控失败；达到阈值就开代理窗口。返回当前是否有代理可用。
+
+    两档：
+      · 短档（默认 90s 内 2 次）→ 开一个短窗口（默认 60s），解决零星软限流；
+      · 升级档（默认 300s 内 3 次）→ 说明限流**持续未缓解**（大概率是换到的出口
+        或节点本身也被标记），强制再换一个 IP 并把窗口拉到 300s，先把这波熬过去。
+        没有这一档就会「60s 窗口到期 → 回直连 → 又被限制 → 再告警」反复抖。
+    两档同时满足时只走升级档（同一次调用里最多触发一档）。
+    """
     now = time.monotonic()
     with _failover_lock:
         _risk_events[:] = [t for t in _risk_events if t > now - AJIASU_RISK_WINDOW]
@@ -1556,7 +1579,18 @@ def _note_risk_failure(platform: str) -> bool:
         streak = len(_risk_events)
         if streak >= AJIASU_RISK_THRESHOLD:
             _risk_events.clear()
-    if streak >= AJIASU_RISK_THRESHOLD:
+        _risk_events_long[:] = [t for t in _risk_events_long if t > now - AJIASU_ESCALATE_RISK_WINDOW]
+        _risk_events_long.append(now)
+        long_streak = len(_risk_events_long)
+        if long_streak >= AJIASU_ESCALATE_THRESHOLD:
+            _risk_events_long.clear()
+    if long_streak >= AJIASU_ESCALATE_THRESHOLD:
+        logger.info(
+            "爱加速：%.0fs 内风控 %d 次（限流持续未缓解）→ 升级：换 IP 并握住 %.0fs 窗口",
+            AJIASU_ESCALATE_RISK_WINDOW, long_streak, AJIASU_ESCALATE_HOLD,
+        )
+        _start_failover_window(platform, rotate=True, window=AJIASU_ESCALATE_HOLD)
+    elif streak >= AJIASU_RISK_THRESHOLD:
         _start_failover_window(platform)
     return bool(_current_proxy())
 

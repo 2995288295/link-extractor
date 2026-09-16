@@ -57,10 +57,14 @@ DEFAULTS = {
     "DB_PATH": "/opt/link-extractor/data/history.db",
     # 判定阈值
     "ALERT_WINDOW_MINUTES": "15",  # 成功率统计窗口
-    "ALERT_SUCCESS_RATE_THRESHOLD": "90",  # 低于该百分比即告警
+    # 2026-09-16 老大拍板 90 → 80：限流类抖动由 5003 自动换 IP 消化，
+    # 告警只在成功率确实跌破 80% 时才响，别被短暂软限流打爆。
+    "ALERT_SUCCESS_RATE_THRESHOLD": "80",  # 低于该百分比即告警
     "ALERT_MIN_SAMPLES": "5",  # 窗口内有效样本少于此数则不判定成功率，避免误报
     "ALERT_P95_MS": "5000",  # P95 耗时超过该值预警
     "ALERT_PLATFORM_LIMIT_MIN": "3",  # 单平台「暂时限制」次数达到该值即告警
+    # 平台级告警开关：off=整块静音 / auto=限流类静音、非限流类照报（默认）/ on=全开
+    "ALERT_PLATFORM_ALERTS": "auto",
     "ALERT_HEALTH_FAIL_STREAK": "2",  # 健康检查连续失败几次才算服务挂了
     "ALERT_REPEAT_MINUTES": "30",  # 同一故障静默期
     "ALERT_DASHBOARD_URL": "",  # 可选：后台地址，会附在卡片上
@@ -280,6 +284,23 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
 
 PLATFORM_LABEL = {"xiaohongshu": "小红书", "douyin": "抖音"}
 
+# 「平台暂时限制」是软限流，agent 自己换出口 IP 就能解 —— 这类不该推给人。
+# 老大 2026-09-16 明确：告警太频繁，限流类自己处理，只在成功率跌破阈值时才打扰。
+LIMITED_DOMINANT_RATIO = 0.6
+
+
+def _is_limited_dominant(p: dict) -> bool:
+    """该平台的失败是不是「以平台限流为主」。是则归自愈，否才值得报警。"""
+    failed = max(0, int(p.get("valid_total", 0)) - int(p.get("ok", 0)))
+    limited = int(p.get("limited", 0))
+    return limited > 0 and limited >= max(1, failed) * LIMITED_DOMINANT_RATIO
+
+
+def _platform_alert_mode(cfg: dict) -> str:
+    """平台级告警开关：off=全静音（只留自愈），auto=限流类静音/其它照报，on=全开。"""
+    mode = (cfg.get("ALERT_PLATFORM_ALERTS") or "auto").strip().lower()
+    return mode if mode in {"off", "auto", "on"} else "auto"
+
 
 def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict) -> dict:
     """返回 {kind: issue}，issue = {severity, title, template, fields, footer}。"""
@@ -335,12 +356,12 @@ def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict
     # ---- 2. 全局服务成功率 ----------------------------------------------- #
     rate_threshold = cfg_float(cfg, "ALERT_SUCCESS_RATE_THRESHOLD")
     if enough and stats["service_success_rate"] < rate_threshold:
-        # 平台侧限流 vs 服务自身故障，决定「换 IP」还是「查代码」
+        # 平台侧限流 vs 服务自身故障，决定「自愈换 IP」还是「查代码」
         if stats["limited_total"] > 0 and stats["limited_total"] >= stats["service_failures"] * 0.6:
-            hint = "主要是平台侧暂时限制（软限流），通常会自愈；持续不恢复可考虑换 IP 兜底。"
+            hint = "失败以平台侧限流为主 —— 5003 会自动换出口 IP 兜底（5 分钟未缓解即升级长窗口），通常无需人工介入；若长时间不恢复请查代理池额度。"
             template = "orange"
         else:
-            hint = "失败以服务侧错误为主，建议看后台失败原因聚合。"
+            hint = "失败以服务侧错误为主，换 IP 救不了，建议看后台失败原因聚合。"
             template = "red"
         fields = [
             ("{}服务成功率".format(since_label), "{}%（阈值 {}%）".format(stats["service_success_rate"], rate_threshold)),
@@ -353,10 +374,19 @@ def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict
         issue("service_success_rate", "critical", "🟠 链接提取 5003 · 成功率跌破阈值", template, fields, hint)
 
     # ---- 3. 平台级异常 ---------------------------------------------------- #
+    # 「平台暂时限制」是窗口式软限流，agent 自己换出口 IP 就能解 —— 见 extractor.py
+    # 的「持续限流升级档」：300s 内风控达阈值即强制换 IP 并握住 300s 窗口。
+    # 所以这类**不再打扰人**（老大 2026-09-16：告警太频繁，限流自己处理）。
+    # 只有当失败**不是**以限流为主时才推 —— 那说明是该平台的真实故障
+    # （选择器失效 / 接口变更），换 IP 救不了，必须人来看。
+    # ALERT_PLATFORM_ALERTS: off=整块静音 / auto=限流静音、其它照报（默认）/ on=全开。
+    pmode = _platform_alert_mode(cfg)
     for name, p in stats["platforms"].items():
         label = PLATFORM_LABEL.get(name, name)
-        # (a) 平台暂时限制次数超标
+        # (a) 平台暂时限制次数超标 —— 归自愈，仅在 on 时推
         if p["limited"] >= cfg_int(cfg, "ALERT_PLATFORM_LIMIT_MIN"):
+            if pmode != "on":
+                continue
             issue(
                 "platform_limit_{}".format(name), "warning",
                 "🟠 {} 平台暂时限制集中出现".format(label),
@@ -367,10 +397,12 @@ def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict
                     ("该平台成功率", "{}%（{} 样本）".format(p["service_success_rate"], p["valid_total"])),
                     ("含义", "平台把请求 302 到登录页，属窗口式软限流"),
                 ],
-                "若持续超过 30 分钟不恢复，可考虑启用换 IP 兜底。",
+                "常态下会由 5003 自动换 IP 兜底，无需人工介入。",
             )
         # (b) 单平台成功率显著偏低（但全局尚可时才有独立价值）
         elif p["valid_total"] >= min_samples and p["service_success_rate"] < rate_threshold:
+            if pmode == "off" or (pmode == "auto" and _is_limited_dominant(p)):
+                continue  # 限流主导 → 交给自动换 IP；off → 整块不报
             issue(
                 "platform_rate_{}".format(name), "warning",
                 "🟠 {} 成功率偏低".format(label),
@@ -379,7 +411,7 @@ def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict
                     ("{}".format(since_label), "{}%（{} 样本）".format(p["service_success_rate"], p["valid_total"])),
                     ("全局成功率", "{}%".format(stats["service_success_rate"])),
                 ],
-                "单平台垮塌、其他平台正常，通常是该平台侧变更或出口 IP 被针对。",
+                "失败并非以平台限流为主，换 IP 大概率救不了，建议看后台失败原因聚合。",
             )
 
     # ---- 4. P95 耗时 ------------------------------------------------------ #
