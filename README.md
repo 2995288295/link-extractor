@@ -170,7 +170,29 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now link-extractor-healthcheck.timer
 ```
 
-检查状态：`systemctl list-timers link-extractor-healthcheck.timer`。检查失败和自动重启记录在 `journalctl -t link-extractor-healthcheck`。该机制仅做本机自动恢复；如需手机/短信告警，应另接外部监控服务。
+检查状态：`systemctl list-timers link-extractor-healthcheck.timer`。检查失败和自动重启记录在 `journalctl -t link-extractor-healthcheck`。该机制只负责「进程没了就拉起来」（本机自动恢复）。
+
+## 异常告警与自动换 IP（ops/link-extractor-alert）
+
+`ops/link-extractor-alert.timer` 每 5 分钟巡检一轮，异常时推送到飞书（自建应用私聊，失败回退群机器人）：
+
+```bash
+sudo install -m 644 ops/link-extractor-alert.service /etc/systemd/system/
+sudo install -m 644 ops/link-extractor-alert.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now link-extractor-alert.timer
+```
+
+配置在 `/etc/link-extractor-alert.env`（**改完下一轮生效，不用重启服务**，建议 `chmod 600`）。
+判定口径两个要点：**成功率剔除用户输入问题**（`invalid_input` / `expired_content` 不算服务故障）；
+**告警只盯成功率跌破 `ALERT_SUCCESS_RATE_THRESHOLD`（默认 80%）**。
+
+「平台暂时限制」这类窗口式软限流**默认不再单独告警**（`ALERT_PLATFORM_ALERTS=auto`），
+改由服务**自动换出口 IP** 兜底：`lib/extractor.py` 在风控成簇时临时租用爱加速出口，
+90s 内 2 次即开 60s 短窗口；若 **300s 内达 3 次（判定为持续未缓解）则升级** ——
+强制再换一个出口并把窗口拉到 300s，避免「窗口到期→回直连→又被限制」反复抖动。
+（阈值 `AJIASU_FAILOVER_*` 走 `/etc/link-extractor.env`；签到冻结窗口 08:00–08:25 内一律让路。）
+
+于是：**短暂限流系统自己消化，只有成功率确实跌破 80% 才会打扰人。**
 
 ## 性能与数据库维护
 
