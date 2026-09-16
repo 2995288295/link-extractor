@@ -177,13 +177,14 @@ _session_local = threading.local()
 def _new_session() -> requests.Session:
     """创建独立会话；风控重试不能复用原会话的 Cookie。
 
-    处于「爱加速换 IP 窗口」内时自动挂上代理出口（见 _current_proxy）。
+    有生效中的代理时自动挂上代理出口（见 _ensure_proxy）。
+    注意这里可能触发「按需 acquire」（约 3s）：只有此前挂过换 IP 意图时才会。
     """
     session = requests.Session()
     adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=0)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    proxy = _current_proxy()
+    proxy = _ensure_proxy()
     if proxy:
         session.proxies.update({"http": proxy, "https": proxy})
     return session
@@ -194,7 +195,7 @@ def _get_session() -> requests.Session:
 
     代理窗口开/关时切换会话，避免复用直连连接池导致请求绕过代理。
     """
-    proxy = _current_proxy()
+    proxy = _ensure_proxy()
     session = getattr(_session_local, "session", None)
     if session is not None and getattr(_session_local, "session_proxy", "") != proxy:
         with contextlib.suppress(Exception):
@@ -639,7 +640,7 @@ def _resolve_short_link(url: str) -> str:
     # 明确被平台打回 /login = 出口 IP 被窗口式软限流。
     # 计入风控计数（与笔记页链路共用同一份计数），达阈值自动开代理窗口。
     proxy_ready = _note_risk_failure(platform)
-    if proxy_ready and _current_proxy():
+    if proxy_ready and _ensure_proxy():
         for headers in candidates:
             retry_status, retry_resolved = _request_short_link(url, headers)
             if retry_status == "ok":
@@ -1365,28 +1366,33 @@ AJIASU_POOL_PYTHON = os.environ.get("AJIASU_POOL_PYTHON", "/usr/bin/python3")
 # 池级热配置：兜底开关（failoverEnabled）与签到冻结窗口（freezeStart/freezeEnd）都在这里。
 # 该文件存在时以它为准（改文件即生效，无需重启 5003）；不存在时回退到下面的环境变量。
 AJIASU_POOL_CONFIG = os.environ.get("AJIASU_POOL_CONFIG", "/opt/ajiasu-pool/pool-config.json")
-AJIASU_WINDOW_SECONDS = int(_float_env("AJIASU_FAILOVER_WINDOW", 60, 10, 600))
+AJIASU_HOLD_SECONDS = _float_env("AJIASU_FAILOVER_HOLD_SECONDS", 60, 10, 900)
+AJIASU_INTENT_TTL = _float_env("AJIASU_FAILOVER_INTENT_TTL", 300, 10, 3600)
+AJIASU_ACQUIRE_WAIT = _float_env("AJIASU_ACQUIRE_WAIT", 5, 0, 60)
 AJIASU_MIN_INTERVAL = _float_env("AJIASU_FAILOVER_MIN_INTERVAL", 30, 0, 3600)
 AJIASU_MAX_PER_HOUR = int(_float_env("AJIASU_FAILOVER_MAX_PER_HOUR", 6, 0, 200))
 AJIASU_RISK_WINDOW = _float_env("AJIASU_FAILOVER_RISK_WINDOW", 90, 5, 3600)
 AJIASU_RISK_THRESHOLD = int(_float_env("AJIASU_FAILOVER_RISK_THRESHOLD", 2, 1, 50))
 AJIASU_POOL_TIMEOUT = _float_env("AJIASU_FAILOVER_POOL_TIMEOUT", 45, 5, 120)
 
-# 「持续限流」升级档。短档只解决零星软限流（换一次 IP、握 60s 就好）；
-# 但限流若是**持续**的（例如换到的节点出口也被标记），短窗口一到期就回直连、又被限制，
-# 于是「失败 → 告警 → 自愈 → 再失败」来回抖，把告警打爆。
-# 判据：AJIASU_ESCALATE_RISK_WINDOW（默认 300s = 「5 分钟内没缓解」）内风控次数
-# 达到 AJIASU_ESCALATE_THRESHOLD（默认 3）→ 强制再换一个出口 IP，并把代理窗口
-# 拉到 AJIASU_ESCALATE_HOLD（默认 300s），先把这波限流熬过去。
+# 「持续限流」升级档。判据：AJIASU_ESCALATE_RISK_WINDOW（默认 300s = 「5 分钟内没缓解」）
+# 内风控次数达到 AJIASU_ESCALATE_THRESHOLD（默认 3）→ 判定换到的出口也不行，
+# **强制换一条线路**（挂意图时带 rotate）。
+# 注意：v1.7.0 起升级档**不再拉长窗口**。旧实现把窗口拉到 300s，但实测那 300s 里
+# 一个请求都没有（额度纯亏），真正的解法是「按需取代理」——见 _ensure_proxy()。
 AJIASU_ESCALATE_RISK_WINDOW = _float_env("AJIASU_FAILOVER_ESCALATE_RISK_WINDOW", 300, 30, 3600)
 AJIASU_ESCALATE_THRESHOLD = int(_float_env("AJIASU_FAILOVER_ESCALATE_THRESHOLD", 3, 2, 100))
-AJIASU_ESCALATE_HOLD = _float_env("AJIASU_FAILOVER_ESCALATE_HOLD", 300, 30, 900)
 
 _RISK_CONTROL_MARKERS = ("平台暂时限制", "触发验证", "登录页")
 
 _failover_lock = threading.Lock()
+# gthread 单进程 4 线程共享这份状态：acquire 必须「单飞」，否则 4 个线程会同时抢
+# 1080（全机单连接）并互相踩租约。Condition 让其余线程等第一个人的结果。
+_failover_cond = threading.Condition(_failover_lock)
 _failover_state: dict[str, Any] = {
     "proxy": "", "active_until": 0.0, "lease_id": "", "account": "", "exit_ip": "", "timer": None,
+    # 换 IP 意图：达阈值只挂意图，真有请求要走代理时才 acquire（v1.7.0）
+    "intent_platform": "", "intent_until": 0.0, "acquiring": False,
 }
 _failover_history: list[float] = []
 _risk_events: list[float] = []
@@ -1465,7 +1471,7 @@ def _pool_call(args: list[str], timeout: Optional[float] = None) -> Optional[dic
     """调用代理池 CLI，取最后一行 JSON。
 
     这里刻意不做开关检查：release 必须永远能执行，否则「窗口开着时把开关关掉」
-    会让租约泄漏到超时。开关判断放在触发侧（_start_failover_window）。
+    会让租约泄漏到超时。开关判断放在触发侧（_arm_failover_intent / _ensure_proxy）。
     """
     try:
         proc = subprocess.run(
@@ -1503,11 +1509,20 @@ def _end_failover_window() -> None:
     logger.info("爱加速换 IP 窗口结束，已释放代理（%s）", result.get("state") or "unknown")
 
 
-def _start_failover_window(platform: str, rotate: bool = False, window: Optional[float] = None) -> bool:
-    """开一个代理窗口；rotate=True 表示强制再换一个节点/出口 IP。
+def _arm_failover_intent(platform: str, rotate: bool = False) -> bool:
+    """挂起「换 IP 意图」——**不租代理**，等真有请求要用时才租。
 
-    window 不给就用默认短窗口 AJIASU_WINDOW_SECONDS；「持续限流升级档」会传更长的值，
-    把窗口拉长到能熬过这一波限流，避免短窗口到期即回直连、又被限制地来回抖动。
+    v1.7.0 的核心改动。旧实现一达阈值就立刻 acquire 一个固定时长的窗口并开始计时，
+    而线上流量稀疏（1–2 分钟一条）→ 窗口大多开在没请求的空档里，额度白扣：
+    2026-09-16 实测 17 个窗口、1261.7s 额度只承载了约 8 个请求，其中一笔 300s 的
+    升级档窗口覆盖 0 个请求。现在拆成两段：
+
+      · 达阈值 → 只挂意图（本函数），**零消耗**；
+      · 真有请求要走代理时 → _ensure_proxy() 才 acquire（实测约 3s），拿到后握
+        AJIASU_HOLD_SECONDS，到期释放。
+
+    rotate=True（升级档）表示「当前这条线路不行」：先把已有租约放掉，逼下一次
+    acquire 换一条。
     """
     if not _failover_switch_on():
         logger.info("跳过爱加速换 IP [%s]：热开关已关闭", platform)
@@ -1521,8 +1536,6 @@ def _start_failover_window(platform: str, rotate: bool = False, window: Optional
     if rotate:
         _end_failover_window()
     with _failover_lock:
-        if _current_proxy():
-            return True
         now = time.monotonic()
         _failover_history[:] = [t for t in _failover_history if t > now - 3600]
         if len(_failover_history) >= AJIASU_MAX_PER_HOUR:
@@ -1531,46 +1544,113 @@ def _start_failover_window(platform: str, rotate: bool = False, window: Optional
         if not rotate and _failover_history and now - _failover_history[-1] < AJIASU_MIN_INTERVAL:
             logger.info("跳过爱加速换 IP [%s]：距上次不足 %.0fs", platform, AJIASU_MIN_INTERVAL)
             return False
-        window = float(window or AJIASU_WINDOW_SECONDS)
-        lease = _pool_call([
-            "acquire", "--json", "--rotate", "--ttl", str(int(window) + 15),
-            "--reason", f"{platform}-risk",
-        ])
-        if not lease or not lease.get("ok") or not lease.get("proxy"):
-            logger.info(
-                "爱加速换 IP 未取到代理 [%s]：%s",
-                platform,
-                (lease or {}).get("message") or (lease or {}).get("state") or "pool-error",
-            )
-            return False
         _failover_history.append(now)
         _failover_state.update({
-            "proxy": str(lease["proxy"]),
-            "active_until": now + window,
-            "lease_id": str(lease.get("leaseId") or ""),
-            "account": str(lease.get("account") or ""),
-            "exit_ip": str(lease.get("exitIp") or ""),
+            "intent_platform": platform,
+            "intent_until": now + AJIASU_INTENT_TTL,
         })
-        timer = threading.Timer(window, _end_failover_window)
-        timer.daemon = True
-        _failover_state["timer"] = timer
-        timer.start()
     logger.info(
-        "爱加速换 IP 生效 [%s]：account=%s node=%s exitIp=%s 窗口=%ss",
-        platform, lease.get("account"), lease.get("node"), lease.get("exitIp"), window,
+        "爱加速：挂起换 IP 意图 [%s] rotate=%s TTL=%.0fs（不预租，等真有请求要走代理时才 acquire）",
+        platform, rotate, AJIASU_INTENT_TTL,
     )
     return True
 
 
+def _intent_active() -> bool:
+    """是否有未过期的换 IP 意图。无锁快路径：每个请求都会问一次。"""
+    state = _failover_state
+    return bool(state["intent_platform"]) and time.monotonic() < float(state["intent_until"] or 0.0)
+
+
+def _do_acquire(platform: str) -> bool:
+    """真正去池子租一个代理并启动到期释放。调用方**不得**持有 _failover_lock。"""
+    hold = float(AJIASU_HOLD_SECONDS)
+    lease = _pool_call([
+        "acquire", "--json", "--rotate", "--ttl", str(int(hold) + 15),
+        "--reason", f"{platform}-risk",
+    ])
+    if not lease or not lease.get("ok") or not lease.get("proxy"):
+        logger.info(
+            "爱加速换 IP 未取到代理 [%s]：%s",
+            platform,
+            (lease or {}).get("message") or (lease or {}).get("state") or "pool-error",
+        )
+        return False
+    now = time.monotonic()
+    timer = threading.Timer(hold, _end_failover_window)
+    timer.daemon = True
+    with _failover_lock:
+        _failover_state.update({
+            "proxy": str(lease["proxy"]),
+            "active_until": now + hold,
+            "lease_id": str(lease.get("leaseId") or ""),
+            "account": str(lease.get("account") or ""),
+            "exit_ip": str(lease.get("exitIp") or ""),
+            "timer": timer,
+        })
+    timer.start()
+    logger.info(
+        "爱加速换 IP 生效 [%s]：account=%s node=%s exitIp=%s 握=%.0fs（按需取，计时起点=有请求时）",
+        platform, lease.get("account"), lease.get("node"), lease.get("exitIp"), hold,
+    )
+    return True
+
+
+def _ensure_proxy() -> str:
+    """按需取代理：**唯一**会真正 acquire 的入口，在请求路径上调用。
+
+    没有未过期意图时立即返回空串（零阻塞、零消耗）——这就是「空转」被消掉的地方。
+    有意图时才去租，且 4 个 gthread 里只有一个真正执行 acquire，其余最多等
+    AJIASU_ACQUIRE_WAIT 秒复用同一份代理；等不到就退回直连，不拖死用户请求。
+    """
+    proxy = _current_proxy()
+    if proxy:
+        return proxy
+    if not _intent_active():
+        return ""
+    deadline = time.monotonic() + AJIASU_ACQUIRE_WAIT
+    while True:
+        with _failover_cond:
+            proxy = _current_proxy()
+            if proxy:
+                return proxy
+            acquiring = bool(_failover_state["acquiring"])
+            # 有人在取就陪着等。这里**不能**直接查「有没有意图」：意图要等 acquire
+            # 结束后才清，否则等在门外的同伴会把它误判成「没意图」而退回直连。
+            if not acquiring and not _intent_active():
+                return ""
+            if not acquiring:
+                _failover_state["acquiring"] = True
+                platform = str(_failover_state["intent_platform"])
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            _failover_cond.wait(remaining)
+    abandoned = (not _failover_switch_on() or _in_freeze_window())
+    if abandoned:
+        logger.info("爱加速：意图兑现前开关已关或进入冻结窗口，放弃本次取代理")
+    try:
+        ok = False if abandoned else _do_acquire(platform)
+    finally:
+        # 意图无论成败都在这里才清空（清早了会误伤同伴，清不掉会反复 acquire）。
+        with _failover_cond:
+            _failover_state.update({"acquiring": False, "intent_platform": "", "intent_until": 0.0})
+            _failover_cond.notify_all()
+    return _current_proxy() if ok else ""
+
+
 def _note_risk_failure(platform: str) -> bool:
-    """记录一次风控失败；达到阈值就开代理窗口。返回当前是否有代理可用。
+    """记录一次风控失败；达阈值只**挂意图**（不再预租代理）。返回是否该走换 IP 重试。
 
     两档：
-      · 短档（默认 90s 内 2 次）→ 开一个短窗口（默认 60s），解决零星软限流；
-      · 升级档（默认 300s 内 3 次）→ 说明限流**持续未缓解**（大概率是换到的出口
-        或节点本身也被标记），强制再换一个 IP 并把窗口拉到 300s，先把这波熬过去。
-        没有这一档就会「60s 窗口到期 → 回直连 → 又被限制 → 再告警」反复抖。
+      · 短档（默认 90s 内 2 次）→ 挂一个换 IP 意图；
+      · 升级档（默认 300s 内 3 次）→ 判定限流持续未缓解（换到的出口也不行），
+        挂意图时带 rotate，逼下一次 acquire 换一条线路。
     两档同时满足时只走升级档（同一次调用里最多触发一档）。
+
+    ⚠️ 这里**不花钱**。真正的 acquire 由 _ensure_proxy() 在请求路径上按需完成，
+    所以「挂了一堆意图但没有请求来」不会再烧额度。
     """
     now = time.monotonic()
     with _failover_lock:
@@ -1584,15 +1664,23 @@ def _note_risk_failure(platform: str) -> bool:
         long_streak = len(_risk_events_long)
         if long_streak >= AJIASU_ESCALATE_THRESHOLD:
             _risk_events_long.clear()
+    armed = False
     if long_streak >= AJIASU_ESCALATE_THRESHOLD:
         logger.info(
-            "爱加速：%.0fs 内风控 %d 次（限流持续未缓解）→ 升级：换 IP 并握住 %.0fs 窗口",
-            AJIASU_ESCALATE_RISK_WINDOW, long_streak, AJIASU_ESCALATE_HOLD,
+            "爱加速：%.0fs 内风控 %d 次（限流持续未缓解）→ 升级档：挂意图并要求换一条线路",
+            AJIASU_ESCALATE_RISK_WINDOW, long_streak,
         )
-        _start_failover_window(platform, rotate=True, window=AJIASU_ESCALATE_HOLD)
+        armed = _arm_failover_intent(platform, rotate=True)
     elif streak >= AJIASU_RISK_THRESHOLD:
-        _start_failover_window(platform)
-    return bool(_current_proxy())
+        armed = _arm_failover_intent(platform)
+    # 诊断用：把两档计数与意图结果都打出来，下次触发能自证「谁凑够了阈值」。
+    logger.info(
+        "爱加速风控计数 [%s]：短档 %d/%d(%.0fs) 长档 %d/%d(%.0fs) → %s",
+        platform, streak, AJIASU_RISK_THRESHOLD, AJIASU_RISK_WINDOW,
+        long_streak, AJIASU_ESCALATE_THRESHOLD, AJIASU_ESCALATE_RISK_WINDOW,
+        "已挂意图" if armed else ("已有代理" if _current_proxy() else "未达阈值或被拦"),
+    )
+    return bool(armed or _current_proxy())
 
 
 def _xhs_via_failover(url: str, telemetry: dict[str, int]) -> Optional[dict[str, Any]]:
@@ -1602,6 +1690,9 @@ def _xhs_via_failover(url: str, telemetry: dict[str, int]) -> Optional[dict[str,
     因此仍被判限流时会再换一个节点重试一次，最后再走 meta 兜底。
     """
     telemetry["xhs_failover"] = 1
+    if not _ensure_proxy():
+        logger.info("小红书换 IP 兜底放弃：当前取不到代理（额度/开关/冻结窗口）")
+        return None
     for attempt in (1, 2):
         try:
             data = _run_xhs_request(lambda: _extract_xhs_initial_state(url), telemetry)
@@ -1613,7 +1704,7 @@ def _xhs_via_failover(url: str, telemetry: dict[str, int]) -> Optional[dict[str,
                 "小红书换 IP 第 %d 次仍被判限流（出口 %s）",
                 attempt, _failover_state.get("exit_ip") or "?",
             )
-            if attempt == 2 or not _start_failover_window("xiaohongshu", rotate=True):
+            if attempt == 2 or not _arm_failover_intent("xiaohongshu", rotate=True):
                 return None
         except Exception as exc:  # noqa: BLE001 - 兜底链路，失败即回退原错误
             logger.info("小红书换 IP 后 INITIAL_STATE 失败: %s", exc)

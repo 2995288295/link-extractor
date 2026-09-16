@@ -187,10 +187,16 @@ sudo systemctl daemon-reload && sudo systemctl enable --now link-extractor-alert
 **告警只盯成功率跌破 `ALERT_SUCCESS_RATE_THRESHOLD`（默认 80%）**。
 
 「平台暂时限制」这类窗口式软限流**默认不再单独告警**（`ALERT_PLATFORM_ALERTS=auto`），
-改由服务**自动换出口 IP** 兜底：`lib/extractor.py` 在风控成簇时临时租用爱加速出口，
-90s 内 2 次即开 60s 短窗口；若 **300s 内达 3 次（判定为持续未缓解）则升级** ——
-强制再换一个出口并把窗口拉到 300s，避免「窗口到期→回直连→又被限制」反复抖动。
-（阈值 `AJIASU_FAILOVER_*` 走 `/etc/link-extractor.env`；签到冻结窗口 08:00–08:25 内一律让路。）
+改由服务**自动换出口 IP** 兜底：`lib/extractor.py` 在风控成簇时（90s 内 2 次）**只挂一个
+「换 IP 意图」，不预先租代理**；等真有请求要走代理时（`_ensure_proxy()`）才去租，实测握手约 3s，
+拿到后握 60s 到期释放。300s 内达 3 次（判定持续未缓解）则升级为**强制换一条线路**。
+
+为什么这么改：旧实现一达阈值就按固定时长预租窗口并开始计时，而线上请求稀疏（1–2 分钟一条），
+窗口大多开在没请求的空档里 —— 2026-09-16 实测 **17 个窗口、1261.7s 额度只承载了约 8 个请求**，
+其中一笔 300s 的升级档窗口覆盖 **0 个请求**。改成按需取代理后，**没有请求要用时不花一秒额度**。
+
+（`AJIASU_FAILOVER_HOLD_SECONDS` 握时长 60s / `AJIASU_FAILOVER_INTENT_TTL` 意图 300s /
+`AJIASU_ACQUIRE_WAIT` 等同伴 5s，均走 `/etc/link-extractor.env`；签到冻结窗口 08:00–08:25 内一律让路。）
 
 于是：**短暂限流系统自己消化，只有成功率确实跌破 80% 才会打扰人。**
 
