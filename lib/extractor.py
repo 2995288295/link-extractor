@@ -574,6 +574,23 @@ def _extract_xsec_token(url: str) -> Optional[str]:
     return (query.get("xsec_token") or [None])[0]
 
 
+def _is_xhs_bounce_page(url: str) -> bool:
+    """判定 URL 是否为小红书拦截/错误页（应归为平台风控，而非用户输入问题）。
+
+    实测两种形态（2026-09-16）：
+    - 桌面头被 302 到 /login?redirectPath=...
+    - 分享头被 302 到 /website-login/error?...&error_code=300011&error_msg=账号异常，请稍后重试
+    后者此前未被拦截：短链解析把它当成「解析成功」，轻量兜底再用 "error_code"
+    子串命中后误报成「缺 xsec_token」。注意 redirectPath 的值是 URL 编码的
+    （%26xsec_token%3D...），用 query 精确匹配 error_code=/error_msg= 不会误伤。
+    """
+    parsed = urlparse(url)
+    if parsed.path.rstrip("/") in ("/login", "/website-login/error"):
+        return True
+    query = parsed.query or ""
+    return "error_code=" in query or "error_msg=" in query
+
+
 def _request_short_link(url: str, headers: dict) -> tuple[str, str]:
     """请求一次短链并分类结果：("ok"|"blocked"|"unresolved"|"error", 解析结果)。
 
@@ -590,7 +607,7 @@ def _request_short_link(url: str, headers: dict) -> tuple[str, str]:
     resolved = (resp.url or "").strip()
     if not resolved or resolved == url:
         return "unresolved", ""
-    if urlparse(resolved).path.rstrip("/") == "/login":
+    if _is_xhs_bounce_page(resolved):
         return "blocked", ""
     return "ok", resolved
 
@@ -1077,7 +1094,7 @@ def _extract_xhs_initial_state(
     )
     response.raise_for_status()
 
-    if urlparse(final_url).path.rstrip("/") == "/login":
+    if _is_xhs_bounce_page(final_url):
         raise XhsAccessDeniedError(
             "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
         )
@@ -1161,11 +1178,11 @@ def _extract_xhs_lightweight(
     )
     resp.encoding = "utf-8"
 
-    if urlparse(final_url).path.rstrip("/") == "/login":
+    if _is_xhs_bounce_page(final_url):
         raise XhsAccessDeniedError(
             "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
         )
-    if "404" in final_url or "error_code" in final_url or "error_msg" in final_url:
+    if "404" in urlparse(final_url).path:
         raise MissingTokenError(
             "小红书链接无效或缺少 xsec_token 参数。\n"
             "请使用小红书 App「复制链接」功能获取分享链接（包含 xsec_token 参数），\n"

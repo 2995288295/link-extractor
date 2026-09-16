@@ -4,6 +4,23 @@
 
 ## [未发布]
 
+### 修复（v1.7.1 · 2026-09-16）· 「缺 xsec_token」误报：/website-login/error 归为平台风控
+
+- **现象**：`xhslink.cn/o/2RCIArkIEOz`（链接本身带有效 `xsec_token`）连续报
+  「小红书链接无效或缺少 xsec_token 参数」，且被归类 `invalid_input`（用户输入问题）。
+- **根因**：小红书对服务器出口打回的第二种拦截页此前未被识别——分享头会被
+  302 到 `/website-login/error?...&error_code=300011&error_msg=账号异常，请稍后重试`：
+  1. `_request_short_link()` 只判 `path == "/login"`，该错误页被当成「短链解析成功」；
+  2. 轻量兜底用子串 `"error_code"/"error_msg" in final_url` 命中后抛
+     `MissingTokenError`，把平台风控误报成用户缺 token（还污染了 invalid_input 统计）。
+- **修复**：新增 `_is_xhs_bounce_page()`（判定 `/login`、`/website-login/error`、
+  query 带 `error_code=/error_msg=`；`redirectPath` 的值是 URL 编码的，不会误伤），
+  短链解析与两个提取函数的拦截页判定统一走它。命中后归 `short_link_blocked` /
+  `platform_limited` 链路：计风控计数、达阈值按需换 IP（v1.7.0 机制）。
+  轻量兜底的 "404" 判定同步收紧为 path 匹配，防止 ID/参数里恰好含 "404" 误伤。
+- **验证**：ops/tests 80 项全桩测试全绿；线上复测该短链，报错口径变为
+  「小红书平台暂时限制访问」（`error_kind=short_link_blocked`，`upstream_error`）。
+
 ### 变更（v1.7.0 · 2026-09-16）· ⚠️ 行为变更：换 IP 改为「按需取代理」
 
 - **代理窗口不再按时间预租，改成「达阈值只挂意图、真有请求才取代理」。** 旧实现一达阈值就
