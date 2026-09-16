@@ -65,6 +65,8 @@ DEFAULTS = {
     "ALERT_PLATFORM_LIMIT_MIN": "3",  # 单平台「暂时限制」次数达到该值即告警
     # 平台级告警开关：off=整块静音 / auto=限流类静音、非限流类照报（默认）/ on=全开
     "ALERT_PLATFORM_ALERTS": "auto",
+    # 「首次失败、N 秒内同链接又被重试成功」视为已自动补回，不计入失败样本（0=关闭该口径）
+    "ALERT_RECOVERED_GRACE_SECONDS": "180",
     "ALERT_HEALTH_FAIL_STREAK": "2",  # 健康检查连续失败几次才算服务挂了
     "ALERT_REPEAT_MINUTES": "30",  # 同一故障静默期
     "ALERT_DASHBOARD_URL": "",  # 可选：后台地址，会附在卡片上
@@ -146,7 +148,7 @@ def check_health(base_url: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def collect_stats(db_path: str, window_minutes: int) -> dict:
+def collect_stats(db_path: str, window_minutes: int, recovered_grace_seconds: int = 180) -> dict:
     """读取窗口内的成功率与平台分布。对 DB 只读。"""
     threshold_ts = (datetime.now() - timedelta(minutes=window_minutes)).strftime(TZ_FMT)
     stats = {
@@ -161,6 +163,7 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
         "platforms": {},
         "p95_ms": 0,
         "limited_total": 0,
+        "recovered": 0,
     }
     if not os.path.isfile(db_path):
         stats["error"] = "数据库不存在: {}".format(db_path)
@@ -193,6 +196,30 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
             "(error LIKE '%平台暂时限制%' AND lower(original_url) LIKE '%xhslink%')"
         )
         short_expr = "CASE WHEN {} THEN 1 ELSE 0 END".format(short_where)
+        # 「首次失败、但同一条链接几秒后又被重试成功」的记录。
+        # 为什么要单拎出来：客户端拿到失败会在几秒后重试（实测 3–6s），于是同一条短链
+        # 会在 history 里留下「失败 + 成功」两行。若照单全收，每成功一条都白背一次失败，
+        # 成功率被系统性拉低（2026-09-16 实测近 30 分钟 30 成功 / 18 限流 ≈ 62%，
+        # 而用户其实每条都拿到了链接）—— 告警阈值不管设 90 还是 80 都会一直响。
+        # 口径：失败行若在 GRACE 秒内出现同 URL 的成功行，视为「已自动补回」，不计入失败样本。
+        grace = recovered_grace_seconds
+        limited_where_q = (
+            "(history.error_kind IN ('platform_limited','short_link_blocked')"
+            " OR (history.error_kind = '' AND history.error LIKE '%平台暂时限制%'))"
+            if has_error_kind else "history.error LIKE '%平台暂时限制%'"
+        )
+        if grace > 0:
+            recovered_expr = (
+                "CASE WHEN {lim} AND EXISTS ("
+                "  SELECT 1 FROM history h2"
+                "  WHERE h2.original_url = history.original_url"
+                "    AND h2.outcome_class = 'success'"
+                "    AND h2.created_at >= history.created_at"
+                "    AND h2.created_at <= datetime(history.created_at, '+{grace} seconds')"
+                ") THEN 1 ELSE 0 END"
+            ).format(lim=limited_where_q, grace=grace)
+        else:
+            recovered_expr = "0"  # grace=0 → 关闭该口径，失败一行都不放过
         row = conn.execute(
             """
             SELECT COUNT(*) AS total,
@@ -200,21 +227,27 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
                    SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content')
                             THEN 1 ELSE 0 END) AS user_errors,
                    SUM(CASE WHEN outcome_class IN ('upstream_error','internal_error')
-                            THEN 1 ELSE 0 END) AS service_failures
+                             AND {rec} = 0
+                            THEN 1 ELSE 0 END) AS service_failures,
+                   SUM({rec}) AS recovered
             FROM history WHERE created_at >= ?
-            """,
+            """.format(rec=recovered_expr),
             (threshold_ts,),
         ).fetchone()
         total = row["total"] or 0
         ok = row["ok"] or 0
         user_errors = row["user_errors"] or 0
-        valid_total = total - user_errors
+        service_failures = row["service_failures"] or 0
+        recovered = row["recovered"] or 0
+        # 有效样本 = 成功 + 真实失败；用户输入问题与「已自动补回」都不进分母。
+        valid_total = ok + service_failures
         stats.update({
             "available": True,
             "total": total,
             "ok": ok,
             "user_errors": user_errors,
-            "service_failures": row["service_failures"] or 0,
+            "service_failures": service_failures,
+            "recovered": recovered,
             "valid_total": valid_total,
             "service_success_rate": round(ok / valid_total * 100, 1) if valid_total else 100.0,
         })
@@ -237,17 +270,20 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
                    SUM(CASE WHEN outcome_class = 'success' THEN 1 ELSE 0 END) AS ok,
                    SUM(CASE WHEN outcome_class IN ('invalid_input','expired_content')
                             THEN 1 ELSE 0 END) AS user_errors,
-                   SUM({limited}) AS limited,
-                   SUM({short}) AS limited_short
+                   SUM(CASE WHEN outcome_class IN ('upstream_error','internal_error')
+                             AND {rec} = 0 THEN 1 ELSE 0 END) AS service_failures,
+                   SUM(CASE WHEN {limited} AND {rec} = 0 THEN 1 ELSE 0 END) AS limited,
+                   SUM(CASE WHEN {short} AND {rec} = 0 THEN 1 ELSE 0 END) AS limited_short
             FROM history WHERE created_at >= ?
             GROUP BY rp
-            """.format(limited=limited_expr, short=short_expr),
+            """.format(limited=limited_expr, short=short_expr, rec=recovered_expr),
             (threshold_ts,),
         ).fetchall():
             if not r["rp"]:
                 continue  # 平台无法识别的少量记录，只计入全局口径
-            p_valid = (r["total"] or 0) - (r["user_errors"] or 0)
             p_ok = r["ok"] or 0
+            p_fail = r["service_failures"] or 0
+            p_valid = p_ok + p_fail  # 同样剔除用户输入问题与「已自动补回」
             stats["platforms"][r["rp"]] = {
                 "total": r["total"] or 0,
                 "ok": p_ok,
@@ -257,9 +293,10 @@ def collect_stats(db_path: str, window_minutes: int) -> dict:
                 "service_success_rate": round(p_ok / p_valid * 100, 1) if p_valid else 100.0,
             }
 
-        # 全局「平台暂时限制」计数：独立统计，不依赖平台识别是否成功
+        # 全局「平台暂时限制」计数：独立统计，不依赖平台识别是否成功；同样剔除「已自动补回」的
         stats["limited_total"] = conn.execute(
-            "SELECT COUNT(*) AS c FROM history WHERE created_at >= ? AND " + limited_where,
+            "SELECT COUNT(*) AS c FROM history WHERE created_at >= ? AND {} AND {} = 0".format(
+                limited_where, recovered_expr),
             (threshold_ts,),
         ).fetchone()["c"] or 0
 
@@ -368,6 +405,11 @@ def evaluate(cfg: dict, healthy: bool, health_err: str, state: dict, stats: dict
             ("有效样本", "{} 次（已排除 {} 次用户输入问题）".format(samples, stats["user_errors"])),
             ("失败次数", "{} 次，其中平台限制 {} 次".format(stats["service_failures"], stats["limited_total"])),
         ]
+        if stats.get("recovered"):
+            fields.append((
+                "已自动补回",
+                "{} 次（首次失败后同链接重试成功，未计入失败样本）".format(stats["recovered"]),
+            ))
         for name, p in sorted(stats["platforms"].items(), key=lambda kv: kv[1]["service_success_rate"]):
             label = PLATFORM_LABEL.get(name, name)
             fields.append(("{}".format(label), "{}%（{} 样本）".format(p["service_success_rate"], p["valid_total"])))
@@ -686,7 +728,7 @@ def run(dry_run: bool = False) -> int:
     else:
         state["health_fail_streak"] = int(state.get("health_fail_streak", 0)) + 1
 
-    stats = collect_stats(cfg["DB_PATH"], win)
+    stats = collect_stats(cfg["DB_PATH"], win, cfg_int(cfg, "ALERT_RECOVERED_GRACE_SECONDS"))
     issues = evaluate(cfg, healthy, health_err, state, stats)
 
     current_kinds = set(issues)
@@ -703,10 +745,11 @@ def run(dry_run: bool = False) -> int:
     # 已恢复的
     recovered = [k for k, v in known.items() if v.get("active") and k not in current_kinds]
 
-    print("[{ts}] health={h} streak={s} window={w}min total={t} valid={v} rate={r}% limited={l} p95={p}ms issues={i}".format(
+    print("[{ts}] health={h} streak={s} window={w}min total={t} valid={v} rate={r}% limited={l} recovered={rec} p95={p}ms issues={i}".format(
         ts=datetime.now().strftime(TZ_FMT), h=healthy, s=state["health_fail_streak"],
         w=win, t=stats.get("total", 0), v=stats.get("valid_total", 0),
         r=stats.get("service_success_rate", "-"), l=stats.get("limited_total", 0),
+        rec=stats.get("recovered", 0),
         p=stats.get("p95_ms", 0), i=sorted(current_kinds) or "无",
     ))
 
@@ -757,7 +800,8 @@ def channel_label(cfg: dict) -> str:
 
 
 def send_test(cfg: dict) -> int:
-    stats = collect_stats(cfg["DB_PATH"], cfg_int(cfg, "ALERT_WINDOW_MINUTES"))
+    stats = collect_stats(cfg["DB_PATH"], cfg_int(cfg, "ALERT_WINDOW_MINUTES"),
+                          cfg_int(cfg, "ALERT_RECOVERED_GRACE_SECONDS"))
     healthy, health_err = check_health(cfg["ADMIN_BASE_URL"])
     channel = channel_label(cfg)
     card = {
