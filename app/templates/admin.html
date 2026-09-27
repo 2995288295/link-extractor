@@ -449,7 +449,7 @@ section.section-alerts { margin-bottom:16px; }
     </div>
   </div>
 
-  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.5.0</div>
+  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.7.8</div>
 </div>
 
 <div id="loginOverlay">
@@ -466,6 +466,11 @@ section.section-alerts { margin-bottom:16px; }
 <script>
 let adminToken = "";
 const expanded = { devices: false, errors: false, recent: false };
+/* v1.7.8 明细列表缓存：筛选 / 排序 / 展开改为本地重渲染，零 HTTP 请求 */
+let deviceCache = [];     // /api/admin/devices 的 100 条
+let recentCache = [];     // /api/admin/recent 的 50 条
+let lastErrors = [];      // /api/admin/errors 的聚合结果（renderErrors 需要两个入参）
+let lastErrorKinds = [];
 const overlay = document.getElementById("loginOverlay");
 const content = document.getElementById("content");
 
@@ -763,29 +768,29 @@ function renderRecent(items) {
   more.textContent = expanded.recent ? "收起动态列表" : `展开全部动态（${filtered.length}）`;
 }
 
-document.getElementById("deviceMore").onclick = () => { expanded.devices = !expanded.devices; loadAll(); };
-document.getElementById("errorMore").onclick = () => { expanded.errors = !expanded.errors; loadAll(); };
-document.getElementById("recentMore").onclick = () => { expanded.recent = !expanded.recent; loadAll(); };
-let filterTimer = 0;
-function refreshSoon() { clearTimeout(filterTimer); filterTimer = setTimeout(loadAll, 180); }
-document.getElementById("deviceSearch").oninput = refreshSoon;
-document.getElementById("deviceSort").onchange = () => loadAll();
-document.getElementById("recentPlatform").onchange = () => loadAll();
-document.getElementById("recentStatus").onchange = () => loadAll();
+/* v1.7.8：这 7 个交互点原先各自触发一次 loadAll（7 请求 + 1 子进程），
+   现改为复用缓存本地重渲染 —— renderDevices / renderRecent / renderErrors
+   内部本就会自己读搜索框与下拉框的值，所以行为与改前完全一致，只是不发请求。 */
+document.getElementById("deviceMore").onclick = () => { expanded.devices = !expanded.devices; renderDevices(deviceCache); };
+document.getElementById("errorMore").onclick = () => { expanded.errors = !expanded.errors; renderErrors(lastErrors, lastErrorKinds); };
+document.getElementById("recentMore").onclick = () => { expanded.recent = !expanded.recent; renderRecent(recentCache); };
+document.getElementById("deviceSearch").oninput = (() => {
+  let t = 0;
+  return () => { clearTimeout(t); t = setTimeout(() => renderDevices(deviceCache), 120); };
+})();
+document.getElementById("deviceSort").onchange = () => renderDevices(deviceCache);
+document.getElementById("recentPlatform").onchange = () => renderRecent(recentCache);
+document.getElementById("recentStatus").onchange = () => renderRecent(recentCache);
 
-async function loadAll() {
-  try {
-    const range = document.getElementById("rangeSelect").value;
-    document.getElementById("trendTitle").textContent = range === "24h" ? "最近 24 小时提取" : range === "30d" ? "近 30 天提取趋势" : "近 7 天提取趋势";
-    const q = `?range=${encodeURIComponent(range)}`;
-    const [ov, dev, errs, recent, perf, healthRes] = await Promise.all([
-      adminFetch("/api/admin/overview" + q),
-      adminFetch("/api/admin/devices" + q + "&limit=100"),
-      adminFetch("/api/admin/errors" + q),
-      adminFetch("/api/admin/recent" + q),
-      adminFetch("/api/admin/performance" + q),
-      fetch("/api/health").then(r => r.json()).catch(() => null),
-    ]);
+/* ===== 核心指标：随时间变 → 由轮询刷新（3 请求） ===== */
+async function loadCore() {
+  const range = document.getElementById("rangeSelect").value;
+  const q = `?range=${encodeURIComponent(range)}`;
+  const [ov, perf, healthRes] = await Promise.all([
+    adminFetch("/api/admin/overview" + q),
+    adminFetch("/api/admin/performance" + q),
+    fetch("/api/health").then(r => r.json()).catch(() => null),
+  ]);
     document.getElementById("mTotal").textContent = fmt(ov.total);
     document.getElementById("mRate").textContent = ov.success_rate + "%";
     document.getElementById("mFail").textContent = `失败 ${fmt(ov.fail)} · 服务稳定性 ${ov.service_success_rate ?? ov.success_rate}%`;
@@ -810,14 +815,48 @@ async function loadAll() {
     renderPlatformHealth(ov.platform_health);
     renderServiceStatus(healthRes, ov, perf);
     renderAlerts(ov, perf, healthRes);
-    renderDevices(dev.devices);
-    renderErrors(errs.errors, errs.error_kinds);
-    renderRecent(recent.items);
-    loadPool();
+}
+
+/* ===== 明细列表：变化慢 → 只在全量刷新时拉（3 请求） ===== */
+async function loadDetails() {
+  const range = document.getElementById("rangeSelect").value;
+  const q = `?range=${encodeURIComponent(range)}`;
+  const [dev, errs, recent] = await Promise.all([
+    adminFetch("/api/admin/devices" + q + "&limit=100"),
+    adminFetch("/api/admin/errors" + q),
+    adminFetch("/api/admin/recent" + q),
+  ]);
+  deviceCache = dev.devices || [];
+  recentCache = recent.items || [];
+  lastErrors = errs.errors || [];
+  lastErrorKinds = errs.error_kinds || [];
+  renderDevices(deviceCache);        // 内部自己读搜索框 / 排序，行为与改前一致
+  renderErrors(lastErrors, lastErrorKinds);
+  renderRecent(recentCache);
+}
+
+/* 轮询 / 回到前台用：失败静默，仅 401 才登出（避免未捕获的 Promise rejection） */
+function refreshCore() {
+  loadCore().catch(e => {
+    if (e && e.message === "unauthorized") { logout(); showToast("请重新登录"); }
+  });
+}
+
+/* ===== 全量刷新：首次进入 / 手动「↻ 刷新」/ 切换统计范围 ===== */
+async function loadAll() {
+  try {
+    const range = document.getElementById("rangeSelect").value;
+    document.getElementById("trendTitle").textContent = range === "24h" ? "最近 24 小时提取" : range === "30d" ? "近 30 天提取趋势" : "近 7 天提取趋势";
+    await Promise.all([loadCore(), loadDetails()]);
+    if (currentView() === "pool") loadPool();
   } catch (e) {
     if (e.message === "unauthorized") { logout(); showToast("请重新登录"); }
     else showToast("加载失败，请点击刷新重试");
   }
+}
+
+function currentView() {
+  return document.querySelector(".nav-tab.active")?.dataset.view || "overview";
 }
 
 /* ================= v2.2 代理池运维（爱加速换 IP 兜底） ================= */
@@ -1099,7 +1138,7 @@ document.getElementById("poolBody").addEventListener("click", e => {
 document.getElementById("rangeSelect").onchange = loadAll;
 document.getElementById("trendMetric").onchange = () => loadAll();
 const NAV_TARGETS = { overview: "statusStrip", analysis: "errorList", realtime: "recentList", pool: "poolBody" };
-document.querySelectorAll(".nav-tab").forEach(tab => tab.addEventListener("click", () => { document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active")); tab.classList.add("active"); const anchor = document.getElementById(NAV_TARGETS[tab.dataset.view] || "statusStrip"); if (anchor) (anchor.closest(".dashboard-module") || anchor.closest(".card")).scrollIntoView({behavior:"smooth", block:"start"}); }));
+document.querySelectorAll(".nav-tab").forEach(tab => tab.addEventListener("click", () => { document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active")); tab.classList.add("active"); const anchor = document.getElementById(NAV_TARGETS[tab.dataset.view] || "statusStrip"); if (anchor) (anchor.closest(".dashboard-module") || anchor.closest(".card")).scrollIntoView({behavior:"smooth", block:"start"}); if (tab.dataset.view === "pool") loadPool(); }));
 
 const LAYOUT_KEY = "link-extractor-admin-layout-v1";
 let layoutEditing = false, layoutSnapshot = null;
@@ -1134,7 +1173,26 @@ initLayoutEditor();
   }
 })();
 
-setInterval(() => { if (!content.classList.contains("hidden")) loadAll(); }, 30000);
+/* v1.7.8 轮询：原先 30 秒无条件 loadAll（7 请求 + 1 子进程，切后台照打）。
+   现改为「页面可见 + 已登录」才刷，且只刷会变的核心指标。 */
+let pollTimer = null;
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    if (document.hidden) return;                        // 后台标签页不刷
+    if (content.classList.contains("hidden")) return;   // 未登录不刷
+    refreshCore();                                      // 只刷核心指标（3 请求）
+    if (currentView() === "pool") loadPool();           // 代理池仅在看着时刷
+  }, 30000);
+}
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { stopPolling(); return; }
+  startPolling();
+  if (!content.classList.contains("hidden")) refreshCore();   // 回到前台立刻补一次
+});
+startPolling();
 </script>
 </body>
 </html>
