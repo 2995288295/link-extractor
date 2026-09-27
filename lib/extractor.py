@@ -113,14 +113,18 @@ class RedirectGuardError(UpstreamError):
 
 
 # ---------------------------------------------------------------- 用户可见文案
-# 统一原则（2026-09-27）：**一句话说清是什么事，只给一个动作**。
-# - error 字段 = 发生了什么。不暴露内部实现（不出现 filter_reason / xsec_token /
-#   「页面状态结构」这类代码术语）。
-# - hint 字段 = 下一步**一个**动作。此前出现过
-#   「请稍后重试；若持续失败请从 App 重新复制最新分享链接」这类把两个**互相打架**
-#   的动作堆在一句里的写法（等 vs 换链接），用户不知道该选哪个。
-_XHS_LIMITED_MESSAGE = "小红书平台暂时限制访问"
-_DOUYIN_LIMITED_MESSAGE = "抖音平台暂时限制访问"
+# 统一原则（2026-09-27，v1.7.5 收紧）：**一句话说清这条链接现在是什么状态，只给一个动作**。
+# - error = 用户视角的状态。⚠️ 不要向用户汇报**我们自己的运行状况**：
+#     · 不写「平台限制访问」——那是我们被平台限流，是内部运维问题，
+#       对用户既无意义、又像是在说明这个工具不行；
+#     · 不出现原始 URL、域名/重定向/SSRF 等技术术语（曾把
+#       「链接域名或网络地址不在允许范围内: http://...」直接抛给用户）；
+#     · 不出现 filter_reason / xsec_token 等字段名。
+# - hint = 下一步**一个**动作，不堆互相打架的两个（曾出现
+#   「请稍后重试；若持续失败请从 App 重新复制最新分享链接」——等 vs 换链接）。
+# - 术语：小红书=笔记，抖音=作品；输入问题说「链接」，内容状态说「笔记/作品」。
+_XHS_LIMITED_MESSAGE = "该笔记暂时无法获取"
+_DOUYIN_LIMITED_MESSAGE = "该作品暂时无法获取"
 
 # 各 error_kind → 用户提示。kind 取自本文件上面的异常类定义。
 _ERROR_HINT_BY_KIND = {
@@ -128,19 +132,19 @@ _ERROR_HINT_BY_KIND = {
     "platform_limited": "请稍后重试",
     "short_link_blocked": "请稍后重试",
     # 内容本身没了：重试无用，须用户自己确认
-    "expired_content": "请确认作品仍在，再重新复制链接",
+    "expired_content": "如作品仍在，请重新复制分享链接",
     # 我们这边的问题：让用户等，别让用户改输入
     "page_changed": "请稍后重试",
     "upstream_data_missing": "请稍后重试",
     "upstream_error": "请稍后重试",
     "internal_error": "请稍后重试",
     # 输入问题：给明确的纠正动作
-    "url_truncated": "请重新从 App 复制完整链接",
-    "missing_xsec_token": "请在 App 内重新复制链接",
-    "malformed_url": "请在 App 内重新复制链接",
+    "url_truncated": "请重新复制完整链接",
+    "missing_xsec_token": "请重新复制分享链接",
+    "malformed_url": "请重新复制分享链接",
     "unsupported_domain": "请粘贴抖音或小红书的分享链接",
     "invalid_input": "请粘贴抖音或小红书的分享链接",
-    "redirect_blocked": "请粘贴抖音或小红书的分享链接",
+    "redirect_blocked": "请重新复制分享链接",
 }
 _DEFAULT_ERROR_HINT = "请稍后重试"
 
@@ -160,11 +164,11 @@ def _douyin_filter_message(reason: str, detail: str) -> str:
     """
     text = str(reason or "").lower()
     if "review" in text:
-        return "该作品正在平台审核中"
+        return "该作品正在审核中"
     message = str(detail or "").strip()
     if message:
         return message
-    return "平台未返回该作品内容"
+    return "该作品暂时无法获取"
 
 
 # 细粒度 kind → 粗粒度 outcome_class。
@@ -518,11 +522,11 @@ def _validate_url_integrity(url: str) -> str:
     if "xiaohongshu" in host:
         m = re.search(r"/(?:explore|discovery/item)/([0-9A-Za-z]+)", path)
         if m and len(m.group(1)) < 20:
-            return "链接不完整，可能被聊天工具截断"
+            return "链接不完整"
     elif "douyin" in host:
         m = re.search(r"/(?:video|note|share/(?:video|slides|note))/(\d+)", path, re.I)
         if m and len(m.group(1)) < 15:
-            return "链接不完整，可能被聊天工具截断"
+            return "链接不完整"
     return ""
 
 
@@ -561,7 +565,7 @@ def _safe_get_with_redirects(url: str, *, headers=None, timeout=10, max_redirect
     current = url
     for _ in range(max_redirects + 1):
         if not _is_safe_url(current):
-            raise RedirectGuardError(f"链接域名或网络地址不在允许范围内: {current[:80]}")
+            raise RedirectGuardError("链接地址不受支持")
         resp = _get_session().get(
             current,
             allow_redirects=False,
@@ -574,7 +578,7 @@ def _safe_get_with_redirects(url: str, *, headers=None, timeout=10, max_redirect
         if not location:
             return resp
         current = urljoin(current, location)
-    raise RedirectGuardError("链接重定向次数过多")
+    raise RedirectGuardError("链接无法访问")
 
 
 def _safe_follow_redirects(session, url: str, *, headers=None, timeout=30, max_redirects=5):
@@ -587,7 +591,7 @@ def _safe_follow_redirects(session, url: str, *, headers=None, timeout=30, max_r
     current = url
     for _ in range(max_redirects + 1):
         if not _is_safe_url(current):
-            raise RedirectGuardError(f"重定向目标不在允许范围: {current[:80]}")
+            raise RedirectGuardError("链接地址不受支持")
         resp = session.get(
             current,
             headers=headers or {},
@@ -602,7 +606,7 @@ def _safe_follow_redirects(session, url: str, *, headers=None, timeout=30, max_r
             current = urljoin(current, location)
             continue
         return resp, current
-    raise RedirectGuardError("重定向次数过多")
+    raise RedirectGuardError("链接无法访问")
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -610,7 +614,7 @@ def _safe_follow_redirects(session, url: str, *, headers=None, timeout=30, max_r
 def _extract_first_url(text: str) -> str:
     m = re.search(r"https?://[^\s\u4e00-\u9fff]+", text)
     if not m:
-        raise InvalidInputError("未找到链接")
+        raise InvalidInputError("未识别到有效链接")
     return m.group(0)
 
 
@@ -993,7 +997,7 @@ def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None)
             "cover_url": None,
             "post_id": video_id,
             "partial": True,
-            "hint": "链接已转换为抖音用户主页；主页不包含单条作品的文案和数据",
+            "hint": "该链接是抖音用户主页，不包含单条作品的文案",
         }
     if not video_id:
         share_kind, video_id = _douyin_target(source_url)
@@ -1011,10 +1015,10 @@ def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None)
             "cover_url": None,
             "post_id": video_id,
             "partial": True,
-            "hint": "链接已转换为抖音用户主页；主页不包含单条作品的文案和数据",
+            "hint": "该链接是抖音用户主页，不包含单条作品的文案",
         }
     if not video_id:
-        raise InvalidInputError("抖音链接未包含作品 ID，可能不是作品链接或已失效")
+        raise InvalidInputError("未识别到抖音作品")
 
     share_url = f"https://www.iesdouyin.com/share/{share_kind}/{video_id}"
     parse_started = time.perf_counter()
@@ -1236,7 +1240,7 @@ def _extract_xhs_initial_state(
         r"window\.__INITIAL_STATE__=(.*?)</script>", html, flags=re.DOTALL
     )
     if not state_match:
-        raise PageStructureError("平台页面已更新，暂时无法解析")
+        raise PageStructureError("暂时无法获取该笔记内容")
     state_blob = state_match.group(1)
     state_blob = re.sub(r":undefined([,}])", r":null\1", state_blob)
     state = json.loads(state_blob)
@@ -1247,8 +1251,8 @@ def _extract_xhs_initial_state(
         # 容器非空却取不到笔记，说明字段结构和预期不一致（上游改动）；
         # 容器为空，则是平台没给这条笔记（已删除 / 仅自己可见）。
         if structure_broken:
-            raise PageStructureError("平台页面已更新，暂时无法解析")
-        raise ContentExpiredError("该笔记已被删除或设为私密")
+            raise PageStructureError("暂时无法获取该笔记内容")
+        raise ContentExpiredError("该笔记已删除或设为私密")
 
     note_id = note.get("noteId") or ""
     if not note_id:
@@ -1418,7 +1422,7 @@ def _extract_xhs_with_retries(url: str, telemetry: dict[str, int]) -> dict[str, 
                 telemetry["xhs_retry_wait_ms"] = retry_wait_ms
                 telemetry["xhs_request_parse_ms"] = request_ms
                 return data
-            last_error = ValueError("小红书页面暂未返回正文")
+            last_error = ValueError("暂时无法获取该笔记内容")
             logger.info("小红书第 %d 次请求拿到作品但正文为空", attempt)
         except XhsAccessDeniedError:
             # 登录页大多是窗口式软限流（换出口 IP 能救）；但分享凭证失效也会跳登录页，
@@ -1473,7 +1477,7 @@ def _extract_xhs_with_retries(url: str, telemetry: dict[str, int]) -> dict[str, 
                     _risk_events.clear()
                 return recovered
         raise last_error
-    raise UpstreamDataMissingError("平台未返回该作品的内容")
+    raise UpstreamDataMissingError("该作品暂时无法获取")
 
 
 # ---------------------------------------------------------------- 爱加速换 IP 兜底
@@ -1912,7 +1916,7 @@ def extract_link(raw: str) -> ExtractResult:
     if not _is_safe_url(url):
         return ExtractResult(
             success=False,
-            error="不支持的链接，仅支持抖音和小红书链接",
+            error="仅支持抖音和小红书链接",
             hint="请粘贴抖音或小红书的分享链接",
             error_kind="unsupported_domain",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
@@ -1927,7 +1931,7 @@ def extract_link(raw: str) -> ExtractResult:
         return ExtractResult(
             success=False,
             error=integrity_error,
-            hint="请重新从 App 复制完整链接",
+            hint="请重新复制完整链接",
             error_kind="url_truncated",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -1939,7 +1943,7 @@ def extract_link(raw: str) -> ExtractResult:
         return ExtractResult(
             success=False,
             error=malformed_short_link,
-            hint="请从 App 内直接复制链接，不要手工拼接",
+            hint="请重新复制分享链接",
             error_kind="malformed_url",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -2017,7 +2021,7 @@ def extract_link(raw: str) -> ExtractResult:
         # 只有拿到稳定作品 ID 时，才允许降级为“已转换、文案待补”。
         # 若连作品 ID 都没有，通常是失效短链、登录页或平台错误页，不能误报成功。
         if missing_caption and not post_id:
-            raise UpstreamDataMissingError("平台未返回该作品的信息")
+            raise UpstreamDataMissingError("该作品暂时无法获取")
 
         result = ExtractResult(
             success=True,
@@ -2035,7 +2039,7 @@ def extract_link(raw: str) -> ExtractResult:
             post_id=post_id,
             hint=(
                 data.get("hint", "")
-                or ("链接已转换，但平台暂未返回完整文案；可稍后重试这条链接补齐文案。" if missing_caption else "")
+                or ("文案暂未获取完整，可重试补齐" if missing_caption else "")
             ),
             partial=bool(data.get("partial", False)) or missing_caption,
         )
