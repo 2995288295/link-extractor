@@ -4,6 +4,87 @@
 
 ## [未发布]
 
+### 变更（v1.10.0 · 2026-09-27）· 第四期：后台看板 2.0（多入口构建 + 模块化，视觉零变化）
+
+**范围**：`app/templates/admin.html`（1198 行单文件）→ `frontend/src/admin.html` + `admin.js`
++ `frontend/src/admin/` 7 个模块 + `styles/pages/admin.css`；`app.py` 的 `/admin` 加 v2 灰度分流；
+`frontend/vite.config.js` 改多入口。**用户页一行未改。**
+
+#### 「只搬不改」的证据（与 P1 同一套方法论）
+
+| 层 | 结果 |
+|---|---|
+| 函数体 | **57 个**逐字节一致（归一化仅去 `state.` 前缀与空白） |
+| 顶层裸语句块 | **17 块**一致（onclick 绑定 / addEventListener / init IIFE / `initLayoutEditor();`） |
+| CSS | `pages/admin.css` **20255 B 与原文逐字节一致** |
+| 状态声明 | 原文 16 个顶层变量全部有归属（5 个 `let` 收敛进 `state`、3 个 `const` 具名导出、8 个原地保留） |
+| 顶层节点 | 90 个，**100% 有归属**（脚本未映射即报错退出） |
+
+#### 模块划分
+
+| 文件 | 内容 |
+|---|---|
+| `admin/state.js`（手写） | `state` 对象（5 个跨模块写的 `let`）+ `expanded`/`overlay`/`content` 具名导出 |
+| `admin/core.js` | 会话 / HTTP / 小工具（8 个函数） |
+| `admin/render-metrics.js` | 手写 SVG 趋势图 + 指标渲染（6 个） |
+| `admin/render-tables.js` | 设备/错误/动态三张表 + 7 处本地重渲染绑定（5 个函数） |
+| `admin/load.js` | `loadCore` / `loadDetails` / `loadAll` / `refreshCore` / `currentView`（5 个） |
+| `admin/pool.js` | 代理池运维（21 个 + `poolState` + 事件委托） |
+| `admin/layout-editor.js` | 布局编辑器（10 个 + 4 个常量，含顶层 `initLayoutEditor();` 调用） |
+| `admin.js` | 入口：样式导入 + range/tab 绑定 + init IIFE + 轮询 + 过渡层 |
+
+模块依赖含一个**函数级循环引用**：`core → load → pool → core`（`login()` 调 `loadAll()`，
+`loadAll()` 调 `loadPool()`，`loadPool()` 调 `logout()/showToast()`）。三个模块的顶层语句
+都不在模块体求值期使用循环另一侧的绑定，故 ESM 安全 —— 已由行为级验证实测覆盖。
+
+#### 三个 admin 特有的坑（P1 没有的）
+
+1. **`expanded` 会被盲改正则误伤**：字符串 `"list-expanded"` 与 CSS 类 `.list-expanded` 都含
+   词边界完整的 `expanded`。→ 本期**只对 5 个 `let` 做改名**，且改名时**跳过字符串字面量区间**；
+   `expanded` 是 const 对象引用，直接具名导出，**代码一字不改**。
+2. **12 处内联 onclick 依赖全局函数名**（10 个函数）—— ES module 不挂载就 `ReferenceError`。
+   → `admin.js` 加 `Object.assign(window, {...})` 过渡层。**2.0 方案 §9.2 的拆分清单漏了这一项**
+   （与 P1 漏掉 `unescapeHtml` 同源），已回填到方案文档。
+3. **`cssCodeSplit` 必须为 true**：多入口下 `false` 会把两页样式合并成同一张表，而用户页与后台
+   的选择器大量同名（`.card`/`.btn`/`.metric`）→ 互相污染且先后顺序不受控。
+
+#### 灰度通道
+
+`/admin?v2=1` / `?v2=0` + cookie **`adminui`**（90 天），产物缺失自动回退老版。
+**与用户页的 `ui` cookie 刻意分开** —— 用户页面向外部创作者，后台只有我们自己用，放量节奏不同。
+产物：`dist/admin.html` 4.01 KB(gzip) · `admin-D6lOd26g.css` 4.23 KB · `admin-3iqu8Te0.js` 11.15 KB。
+
+#### 验证（四层，全脚本化）
+
+- **结构层**：函数 57/57 · 裸块 17/17 · CSS 20255 B 逐字节 · 变量归属 16/16
+- **隔离副本 31 项**：默认 v1 / `?v2=1` / `?v2=0` / cookie 粘性 / **产物缺失回退** /
+  两个灰度 cookie 互不干扰 / `/assets` gzip + immutable / 路径穿越 404 / 既有接口不受影响
+- **行为级 42 项 ×2**（真 Chrome + mock server）：v1 与 v2 **各 42/42**；含
+  「搜索/排序/展开 = **0 新请求**」（v1.7.8 性能成果保持）与布局编辑器全流程
+  - ⚠️ 按 §9.3：**有副作用项（兜底开关/轻检/深检/释放/回收/账号增删改）只验「按钮存在 + 绑定未断」，
+    从未实际点击** —— 那是唯一能真改生产状态的界面
+- **视觉级**：DOM **75 个 id 完全一致** · **34 项 computedStyle ×2 断点完全一致** ·
+  盒模型 7 项一致 · 双断点无溢出无裁切无 JS 报错
+- **生产端 21 项**（经隧道真浏览器、**不登录**）：v1/v2 各绿；真实提取 2/2 成功；
+  告警逻辑单测 11/11、alert timer dry-run 正常
+
+#### 顺带记录的两件事
+
+- `app/templates/admin.html` 第 306 行有个**既存 HTML 瑕疵**：
+  `<section ...><div ...></div> aria-labelledby="alertsTitle">` —— 多余的 `aria-labelledby="alertsTitle">`
+  成了页面上的可见文本。**v1 本来就有**，本期「只搬不改」故照原样保留，留给专门的一批清理。
+- 用户页 JS chunk 由 `index-frI5QCS.js`（20356 B）变为 `index-wlCVAi2j.js`（19731 B）：
+  多入口构建把共享的 `modulepreload-polyfill` 抽成独立 chunk。**用户页源码一行未改**
+  （`frontend/src` 下 22 个用户页文件 md5 与 v1.9.1 相同），行为级 17/17 不变。
+  同理用户页 CSS 由 `style-DI41pM7j.css` 更名 `index-DI41pM7j.css`。
+
+#### 回滚
+
+```bash
+ssh zine-server 'cd /opt/link-extractor && git checkout v1.9.1 -- app.py app/templates app/static/dist frontend && systemctl restart link-extractor'
+```
+轻量回滚：访问 `/admin?v2=0` 切回老版看板（无需重启）。
+
 ### 变更（v1.9.1 · 2026-09-27）· 品牌色由黄改回蓝（P2 视觉的回退）
 
 依据老大反馈「颜色用之前的蓝色，不要黄色」。**只改颜色** —— P2 的代码分层、性能收益、

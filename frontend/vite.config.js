@@ -13,11 +13,21 @@ export default defineConfig({
     outDir: "../../app/static/dist",
     emptyOutDir: true,
     assetsDir: "assets",
-    cssCodeSplit: false, // CSS 合并为单文件，与当前"一张样式表"的心智一致
+    // ⚠️ 多入口下必须为 true。cssCodeSplit:false 会把两个页面的样式合并成
+    //    同一张表 —— 用户页与后台看板的选择器大量同名（.card/.btn/.metric），
+    //    合并后互相污染，先后顺序还不受控。单入口时它才等价于"一张样式表"。
+    cssCodeSplit: true,
     target: "es2020",
     // vite 8 的打包器是 rolldown，内置 oxc 压缩；写 "esbuild" 需要单独安装 esbuild 包。
     minify: true,
     sourcemap: false,
     chunkSizeWarningLimit: 200,
+    rollupOptions: {
+      // 路径相对 root（即 src/）
+      input: {
+        index: "index.html",   // 用户页（P1 起走 2.0 灰度通道）
+        admin: "admin.html",   // 后台看板（P4 加入）
+      },
+    },
   },
 });

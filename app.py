@@ -604,6 +604,11 @@ def _v2_index_ready() -> bool:
     return (BASE_DIR / "app" / "static" / "dist" / "index.html").is_file()
 
 
+def _v2_admin_ready() -> bool:
+    """P4：后台看板 2.0 产物 —— 多入口构建的另一半（dist/admin.html）。"""
+    return (BASE_DIR / "app" / "static" / "dist" / "admin.html").is_file()
+
+
 @app.route("/assets/<path:rel>")
 def assets(rel):
     """发 vite 产物（2.0）。
@@ -1918,8 +1923,35 @@ def index():
 
 @app.route("/admin")
 def admin_page():
-    """后台运营看板页面（鉴权由前端 + /api/admin/* 双重保障）。"""
-    return send_from_directory("app/templates", "admin.html")
+    """后台运营看板页面（鉴权由前端 + /api/admin/* 双重保障）。
+
+    P4 起与用户页同构：?v2=1 / ?v2=0 或 cookie adminui=v2 走 2.0 产物；
+    产物缺失自动回退 app/templates/admin.html（v1 底牌，原样保留）。
+    灰度 cookie 与用户页的 `ui` **刻意分开** —— 两者放量节奏不同：
+    用户页面向外部创作者，后台只有我们自己用。
+    """
+    want_v2 = request.args.get("v2")
+    if want_v2 == "1":
+        use_v2 = True
+    elif want_v2 == "0":
+        use_v2 = False
+    else:
+        use_v2 = request.cookies.get("adminui") == "v2"
+    if use_v2 and not _v2_admin_ready():
+        log.warning("v2 后台产物缺失，回退 v1 看板")
+        use_v2 = False
+
+    resp = (
+        send_from_directory("app/static/dist", "admin.html")
+        if use_v2
+        else send_from_directory("app/templates", "admin.html")
+    )
+    if want_v2 in ("0", "1"):
+        resp.set_cookie("adminui", "v2" if want_v2 == "1" else "v1",
+                        max_age=90 * 24 * 3600, samesite="Lax", path="/")
+    # 与 / 同理：HTML 写死了 hash 资源名，必须每次重验证。
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/favicon.ico")

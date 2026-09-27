@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>运营看板 · 链接提取工具</title>
+</head>
+<body>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow">SIGNAL DESK / ADMIN</div>
+      <h1>后台运营看板</h1>
+      <p id="subtitle">链接提取工具 · 全设备数据</p>
+    </div>
+    <div class="updated" id="headerUptime">运行状态加载中</div>
+  </header>
+
+  <div id="content" class="hidden">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+      <button class="btn btn-ghost" onclick="logout()" title="结束当前管理员会话">退出登录</button>
+    </div>
+    <nav class="nav-tabs" aria-label="看板视图"><button class="nav-tab active" data-view="overview">总览</button><button class="nav-tab" data-view="analysis">分析</button><button class="nav-tab" data-view="realtime">实时动态</button><button class="nav-tab" data-view="pool">代理池</button></nav>
+    <div class="layout-toolbar"><span id="layoutState">查看模式 · 布局自动保存</span><div><button class="btn btn-ghost" id="editLayoutBtn">编辑布局</button><button class="btn btn-ghost hidden" id="resetLayoutBtn">恢复默认</button><button class="btn btn-primary hidden" id="saveLayoutBtn">保存布局</button><button class="btn btn-ghost hidden" id="cancelLayoutBtn">取消</button></div></div>
+
+    <div class="toolbar">
+      <div><span class="updated" id="updatedAt">尚未刷新</span></div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <select id="rangeSelect" class="range-select" aria-label="统计范围">
+          <option value="24h">最近 24 小时</option><option value="7d" selected>最近 7 天</option><option value="30d">最近 30 天</option>
+        </select>
+        <button class="btn btn-ghost" onclick="loadAll()" title="重新读取当前范围的数据">↻ 刷新</button>
+        <button class="btn btn-ghost" onclick="exportCsv()" title="下载当前范围的 CSV 报表">↓ 导出</button>
+      </div>
+    </div>
+
+    <div id="dashboardGrid" class="dashboard-grid">
+    <div class="dashboard-module full" data-module="status" data-title="服务状态"><div class="module-head"><span class="drag-handle">⠿</span><b>服务状态</b><span class="module-actions"></span></div><div id="statusStrip" class="status-strip"><span class="status-dot"></span><span id="statusText">正在检查服务状态…</span></div></div>
+
+    <section class="section-alerts dashboard-module full" data-module="alerts" data-title="异常中心"><div class="module-head"><span class="drag-handle">⠿</span><b>异常中心</b><span class="module-actions"></span></div> aria-labelledby="alertsTitle">
+      <div class="card" style="margin-bottom:0;">
+        <div class="toolbar" style="margin-bottom:10px;"><h2 id="alertsTitle" style="margin:0;">异常中心</h2><span class="updated" id="alertSummary">正在分析</span></div>
+        <div id="alertPanel" class="alert-panel"><div class="alert-empty">正在读取服务指标…</div></div>
+      </div>
+    </section>
+
+    <div class="metrics dashboard-module full" data-module="metrics" data-title="核心指标"><div class="module-head"><span class="drag-handle">⠿</span><b>核心指标</b><span class="module-actions"></span></div>
+      <div class="metric"><div class="label">总提取次数</div><div class="value" id="mTotal">-</div><div class="trend flat" id="mTotalTrend">窗口数据</div></div>
+      <div class="metric"><div class="label">转换成功率</div><div class="value" id="mRate">-</div><div class="sub" id="mFail">失败 - · 服务稳定性 -</div></div>
+      <div class="metric"><div class="label">窗口活跃设备</div><div class="value" id="mDevices">-</div><div class="sub" id="mDevicesSub">7天 - · 30天 -</div></div>
+      <div class="metric"><div class="label">今日提取</div><div class="value" id="mToday">-</div><div class="trend flat" id="mTodayTrend">实时累计</div></div>
+    </div>
+
+    <div class="card performance-card dashboard-module full" data-module="performance" data-title="性能与缓存"><div class="module-head"><span class="drag-handle">⠿</span><b>性能与缓存</b><span class="module-actions"></span></div>
+      <h2>性能与缓存</h2>
+      <div class="metrics" style="margin:0;grid-template-columns:repeat(4,1fr);">
+        <div class="metric"><div class="label">平均耗时</div><div class="value" id="pAvg">-</div><div class="sub">毫秒</div></div>
+      <div class="metric"><div class="label">P95 耗时</div><div class="value" id="p95">-</div><div class="sub">毫秒</div></div>
+        <div class="metric"><div class="label">缓存命中率</div><div class="value" id="pHit">-</div></div>
+        <div class="metric"><div class="label">批次 / 队列并发</div><div class="value" id="pBatch">-</div><div class="sub" id="pQueue">队列 -</div></div>
+      </div>
+      <div id="retryInsight" class="sub" style="margin-top:12px;color:var(--muted)">抖音重试成功分布：暂无数据</div>
+    </div>
+
+    <div class="insight-grid dashboard-module full" data-module="insights" data-title="趋势与平台"><div class="module-head"><span class="drag-handle">⠿</span><b>趋势与平台</b><span class="module-actions"></span></div>
+      <div class="card">
+        <div class="toolbar" style="margin-bottom:8px;"><h2 id="trendTitle" style="margin:0;">近 7 天提取趋势</h2><select id="trendMetric" class="range-select" aria-label="趋势指标"><option value="count">提取量</option><option value="rate">成功率</option></select></div>
+        <div class="chart-wrap"><div id="trendChart"></div><div id="chartTip" class="chart-tip"></div></div>
+      </div>
+      <div class="card">
+        <h2>平台表现</h2>
+        <div id="platformDist" class="platform-grid"></div>
+      </div>
+      <div class="card">
+        <h2>平台健康度</h2>
+        <div id="platformHealth"></div>
+      </div>
+    </div>
+
+    <div class="card dashboard-module full" data-module="devices" data-title="设备使用排行"><div class="module-head"><span class="drag-handle">⠿</span><b>设备使用排行</b><span class="module-actions"></span></div>
+      <h2>设备使用排行</h2>
+      <div class="section-tools">
+        <input id="deviceSearch" type="search" placeholder="搜索设备 ID" aria-label="搜索设备">
+        <select id="deviceSort" aria-label="设备排序"><option value="total">按提取数</option><option value="fail">按失败数</option><option value="rate">按成功率</option><option value="recent">按最近活跃</option></select>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>设备</th><th class="num">提取数</th><th class="num">成功</th><th class="num">失败</th><th class="num">成功率</th><th>最后活跃</th></tr></thead>
+          <tbody id="deviceBody"></tbody>
+        </table>
+      </div>
+      <div id="deviceEmpty" class="empty hidden">暂无设备数据</div>
+      <div class="more-row"><button id="deviceMore" type="button">展开全部设备</button></div>
+    </div>
+
+    <div class="grid2 bottom-grid dashboard-module full" data-module="analysis" data-title="失败与动态"><div class="module-head"><span class="drag-handle">⠿</span><b>失败与动态</b><span class="module-actions"></span></div>
+      <div class="card">
+        <div class="toolbar" style="margin-bottom:4px;"><h2 style="margin:0;">失败原因 TOP</h2><span class="updated" id="errorSummary"></span></div>
+        <div id="errorKindSummary" class="kind-chips"></div>
+        <div id="errorList" class="list-collapsed"></div>
+        <div class="more-row"><button id="errorMore" type="button">展开全部错误</button></div>
+      </div>
+      <div class="card">
+        <h2>最近动态（脱敏）</h2>
+        <div class="section-tools"><select id="recentPlatform" aria-label="平台筛选"><option value="all">全部平台</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select><select id="recentStatus" aria-label="状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="error">失败</option></select></div>
+        <div id="recentList" class="list-collapsed"></div>
+        <div class="more-row"><button id="recentMore" type="button">展开全部动态</button></div>
+      </div>
+    </div>
+
+    <div class="card dashboard-module full" data-module="pool" data-title="代理池运维">
+      <div class="module-head"><span class="drag-handle">⠿</span><b>代理池运维</b><span class="module-actions"></span></div>
+      <div class="toolbar" style="margin-bottom:10px;">
+        <h2 style="margin:0;">代理池运维 <span class="updated" id="poolSubtitle">爱加速 · 换 IP 兜底</span></h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" onclick="loadPool()">↻ 刷新</button>
+          <button class="btn btn-ghost" onclick="poolCheckAll()">全量轻检</button>
+          <button class="btn btn-ghost" onclick="poolDeepCheck('')">深度体检</button>
+          <button class="btn btn-ghost" onclick="togglePoolEditor()">+ 新增账号</button>
+        </div>
+      </div>
+
+      <div id="poolStrip" class="status-strip">
+        <span class="status-dot"></span>
+        <span id="poolStripText" style="flex:1;">正在读取代理池…</span>
+        <button class="pool-mini" id="poolFailoverBtn" onclick="poolToggleFailover()">切换兜底</button>
+      </div>
+
+      <div class="pool-grid">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>账号</th><th>启用</th><th class="num">已用 / 额度</th><th class="num">剩余</th><th class="num">预留</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody id="poolBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pool-side">
+          <div class="pool-card">
+            <div class="pool-card-title">风控失败趋势（近 7 天 · 与兜底开关无关）</div>
+            <div id="poolRiskTrend" class="pool-trend"></div>
+          </div>
+          <div class="pool-card">
+            <div class="pool-card-title">最近事件</div>
+            <div id="poolEvents" class="pool-events"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="poolOutput" class="pool-output hidden"></div>
+
+      <div id="poolCreator" class="pool-form hidden">
+        <b>新增爱加速账号</b>
+        <div class="pool-form-grid">
+          <label>手机号<input id="pcUser" placeholder="登录爱加速的手机号"></label>
+          <label>密码<input id="pcPassword" type="password" placeholder="爱加速登录密码"></label>
+          <label>账号名（可留空）<input id="pcName" placeholder="留空则用手机号"></label>
+          <label>每日额度（秒）<input id="pcDaily" type="number" value="1200"></label>
+          <label>预留（秒，留给签到）<input id="pcReserve" type="number" value="0"></label>
+          <label>备注<input id="pcNote" placeholder="可选"></label>
+        </div>
+        <div class="pool-form-actions">
+          <button class="btn btn-primary" style="width:auto" onclick="poolCreateAccount()">登记并验证登录</button>
+          <button class="btn btn-ghost" onclick="togglePoolEditor()">取消</button>
+          <span class="pool-warn">密码只写入本机 0600 配置文件、不落日志；但本面板目前是明文 HTTP，请勿在不可信网络下操作。</span>
+        </div>
+      </div>
+
+      <div id="poolEditor" class="pool-form hidden">
+        <b>编辑账号 <span id="peName"></span></b>
+        <div class="pool-form-grid">
+          <label class="pool-check"><input id="peEnabled" type="checkbox"> 启用（停用后不参与兜底）</label>
+          <label>每日额度（秒）<input id="peDaily" type="number"></label>
+          <label>预留（秒）<input id="peReserve" type="number"></label>
+          <label>备注<input id="peNote"></label>
+          <label>重置密码（留空不改）<input id="pePassword" type="password"></label>
+        </div>
+        <div class="pool-form-actions">
+          <button class="btn btn-primary" style="width:auto" onclick="saveAccountEdit()">保存</button>
+          <button class="btn btn-ghost" onclick="document.getElementById('poolEditor').classList.add('hidden')">取消</button>
+          <span class="pool-warn">手机号不在这里改：换手机号等同于换一个账号，请用「新增账号」。</span>
+        </div>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.10.0</div>
+</div>
+
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>管理员登录</h2>
+    <p>请输入管理员口令以访问运营看板</p>
+    <input type="password" id="adminTokenInput" placeholder="管理员口令">
+    <button class="btn btn-primary" id="loginBtn">登录</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+
+<script type="module" src="./admin.js"></script>
+</body>
+</html>
