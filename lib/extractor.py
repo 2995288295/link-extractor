@@ -130,8 +130,10 @@ ERROR_KIND_TO_OUTCOME = {
     "not_found": "expired_content",
     # 服务失败
     "upstream_error": "upstream_error",
-    "platform_limited": "upstream_error",
-    "short_link_blocked": "upstream_error",
+    # 平台限流是「换出口 IP / 换请求头可解」的一类，必须与 upstream_error 分开，
+    # 否则管理看板的「平台暂时限制」恒为 0（2026-09-27 修）。
+    "platform_limited": "platform_limited",
+    "short_link_blocked": "platform_limited",
     "page_changed": "upstream_error",
     "upstream_data_missing": "upstream_error",
     "upstream_http": "upstream_error",
@@ -1084,20 +1086,74 @@ def _run_xhs_request(callback, telemetry: dict[str, int]):
         _xhs_request_slot.release()
 
 
+def _fetch_xhs_note_page(
+    source_url: str,
+    session: Optional[requests.Session] = None,
+    *,
+    timeout: int = 30,
+) -> "tuple[requests.Response, str]":
+    """拉取小红书笔记页：按「分享头优先、桌面头回退」两套头各试一次。
+
+    2026-09-27 实测（同一笔记页 URL、同一时刻、同一出口 IP，交替各 3 次）：
+    桌面 UA 被打回 /login 3/3，移动端分享 UA 0/3 且能拿到完整笔记页。
+    短链解析早有这个回退（见 _resolve_short_link），笔记页这两处此前漏了，
+    于是表现为「短链解析成功、笔记页必被打回」的假限流，把平台风控误报成
+    「平台暂时限制访问」，诱使运维去换出口 IP（白白烧掉免费额度）。
+
+    两套头都被打回才算真限流，抛 XhsAccessDeniedError 交上层换 IP。
+    """
+    sess = session or _get_session()
+    for headers in (XHS_SHARE_HEADERS, XHS_HEADERS):
+        resp, final_url = _safe_follow_redirects(
+            sess, source_url, headers=headers, timeout=timeout
+        )
+        if not _is_xhs_bounce_page(final_url):
+            return resp, final_url
+    raise XhsAccessDeniedError(
+        "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
+    )
+
+
+def _xhs_note_from_state(
+    state: dict[str, Any]
+) -> "tuple[Optional[dict[str, Any]], bool]":
+    """从 __INITIAL_STATE__ 取笔记对象，兼容新旧两种页面结构。
+
+    返回 (note, structure_broken)：
+    - note             —— 笔记对象；None 表示没取到
+    - structure_broken —— True = 「容器拿到了但字段对不上」，属页面结构变化（上游改动）；
+                          与「笔记被删」处置方式不同，由调用方分别报错。
+
+    结构对照（2026-09-27 实测）：
+    - 新版：state["noteData"]["data"]["noteData"]
+            （作者字段是 user.nickName，小写 n 开头，非 nickname）
+    - 旧版：state["note"]["noteDetailMap"][*]["note"]（现已恒为空 {}，保留兼容）
+    """
+    new_block = (state.get("noteData") or {}).get("data") or {}
+    candidate = new_block.get("noteData") if isinstance(new_block, dict) else None
+    if isinstance(candidate, dict) and candidate:
+        if candidate.get("noteId") or candidate.get("desc") or candidate.get("imageList"):
+            return candidate, False
+        return None, True
+
+    note_map = ((state.get("note") or {}).get("noteDetailMap") or {})
+    if isinstance(note_map, dict) and note_map:
+        first_entry = next(iter(note_map.values()))
+        if isinstance(first_entry, dict):
+            note = first_entry.get("note")
+            if isinstance(note, dict):
+                return note, False
+        return None, True
+    return None, False
+
+
 def _extract_xhs_initial_state(
     url: str, *, session: Optional[requests.Session] = None
 ) -> dict[str, Any]:
     """小红书提取：__INITIAL_STATE__ 页面状态解析（信息最全）。"""
     source_url = _extract_first_url(url)
-    response, final_url = _safe_follow_redirects(
-        session or _get_session(), source_url, headers=XHS_HEADERS, timeout=30
-    )
+    response, final_url = _fetch_xhs_note_page(source_url, session, timeout=30)
     response.raise_for_status()
-
-    if _is_xhs_bounce_page(final_url):
-        raise XhsAccessDeniedError(
-            "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
-        )
 
     html = response.text
     state_match = re.search(
@@ -1109,17 +1165,12 @@ def _extract_xhs_initial_state(
     state_blob = re.sub(r":undefined([,}])", r":null\1", state_blob)
     state = json.loads(state_blob)
 
-    note = None
-    note_map = ((state.get("note") or {}).get("noteDetailMap") or {})
-    if isinstance(note_map, dict) and note_map:
-        first_entry = next(iter(note_map.values()))
-        if isinstance(first_entry, dict):
-            note = first_entry.get("note")
+    note, structure_broken = _xhs_note_from_state(state)
     if not isinstance(note, dict):
         # 区分「笔记没了」和「页面结构变了」——两者处置方式完全不同：
-        # noteDetailMap 非空却取不到 note，说明字段结构和预期不一致（上游改动）；
-        # 整张 map 为空，则是平台没给这条笔记（已删除 / 仅自己可见）。
-        if isinstance(note_map, dict) and note_map:
+        # 容器非空却取不到笔记，说明字段结构和预期不一致（上游改动）；
+        # 容器为空，则是平台没给这条笔记（已删除 / 仅自己可见）。
+        if structure_broken:
             raise PageStructureError("小红书页面状态结构变化，未能取到笔记详情")
         raise ContentExpiredError("未找到小红书笔记详情")
 
@@ -1173,15 +1224,9 @@ def _extract_xhs_lightweight(
 ) -> dict[str, Any]:
     """小红书轻量兜底：meta 标签解析（无 __INITIAL_STATE__ 时使用）。"""
     source_url = _extract_first_url(url)
-    resp, final_url = _safe_follow_redirects(
-        session or _get_session(), source_url, headers=XHS_HEADERS, timeout=10
-    )
+    resp, final_url = _fetch_xhs_note_page(source_url, session, timeout=10)
     resp.encoding = "utf-8"
 
-    if _is_xhs_bounce_page(final_url):
-        raise XhsAccessDeniedError(
-            "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
-        )
     if "404" in urlparse(final_url).path:
         raise MissingTokenError(
             "小红书链接无效或缺少 xsec_token 参数。\n"
