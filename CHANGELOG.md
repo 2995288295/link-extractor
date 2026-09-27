@@ -4,6 +4,54 @@
 
 ## [未发布]
 
+### 修复（v1.7.6 · 2026-09-27）· 立刻批 5 项：报错透传 / 封面代理 / 面板建议 / 权限 / 安全头
+
+由当天全面自查（`docs/2026-09-27-修复清单.md`）整理出的「立刻修」批次，全部低风险。
+
+- **F1 用户可见报错泄漏（确认 Bug）**：`_extract_xhs_initial_state` 里的 `json.loads(state_blob)`
+  没有 try/except（同文件 `_extract_xhs_lightweight` 是包了的）。小红书返回裸
+  `window.__INITIAL_STATE__=undefined` 时抛 `JSONDecodeError`，它继承 `ValueError`，
+  于是走 `extract_link` 的 `error=str(e)` 通路，把
+  `Expecting value: line 1 column 1 (char 0)` 原样显示在用户的「错误信息」栏里。
+  两处修复：① 该行包 try/except → `PageStructureError("暂时无法获取该笔记内容")`；
+  ② 把 `extract_link` 的透传白名单由 `(ValueError, RuntimeError)` 收紧为 **`ExtractError`** ——
+  只信我们自己定义的业务异常能带用户文案，其它一律脱敏为「提取失败」。
+  （实测：非 ExtractError 的 ValueError 已脱敏；自家 `ContentExpiredError` 仍保留友好文案。）
+
+- **F2 `/api/cover` 曾是「同源 HTML 代理」**：原代码把上游 Content-Type **原样透传**，
+  而域名白名单里有 `xiaohongshu.com` 整站 → 实测 `?url=https://www.xiaohongshu.com/`
+  返回 `200 text/html`、36KB、`max-age=86400`，本站域名可承载任意白名单域名下的 HTML
+  （可挂钓鱼页且被浏览器缓存 24h），并构成同源脚本执行面。
+  修复：只放行白名单位图类型（**不用 `image/*` 通配** —— `image/svg+xml` 是可执行脚本的），
+  其余 502；响应加 `X-Content-Type-Options: nosniff`。
+  同时修掉内存风险：`stream=True` + `_read_limited()` 按 5MB 上限流式读取
+  （原先 `r.content` 一次性全读、无上限），封面缓存改**条数 + 总字节（64MB）双上限**淘汰。
+  实测：非图片 → 502；真封面图 → 200 `image/jpeg` 282KB + nosniff，未误伤。
+
+- **F3 面板「处理建议」全部失配（v1.7.4/1.7.5 改文案的连带伤）**：
+  `admin.html` 的 `errorAction()` 仍匹配 `xsec_token` / `作品 ID` / `风控` / `不支持`
+  这些**已从用户文案中删掉**的词，导致输入类错误被一律导到「查看服务日志」，**给运营的指导是错的**。
+  修复：`/api/admin/errors` 每条错误带上 `error_kind`（`MAX(CASE WHEN error_kind != '' ...)`），
+  前端改为**按 error_kind 判定**（`ACTION_BY_KIND` 覆盖 17 类），文案匹配仅作历史行兜底。
+  实测：接口 9 条失败记录全部带 kind，建议映射零回落。
+
+- **F4 `.device_secret` 权限 644 → 600**：这是 device_id 的 HMAC 密钥，保护「历史仅自己可见」。
+  同机还跑着多个服务，任一以别的非 root 用户运行的进程读到它，就能伪造任意 device_id 读删他人历史。
+
+- **F5 补齐基础安全响应头**：`X-Content-Type-Options: nosniff`、`X-Frame-Options: SAMEORIGIN`、
+  `Referrer-Policy: strict-origin-when-cross-origin`（统一加在 `_optimize_response`）。
+  **刻意不设 CSP** —— 页面含内联 `<script>/<style>` 并引用外部资源，配错会直接白屏。
+
+> **关于「5003 直接暴露公网」：这是有意设计，不再作为缺陷项。**
+> 本工具就是给外部创作者自助使用的，用户量大且来源分散，按 IP 收窄不现实。
+> 因此**不加 `ACCESS_TOKEN`**（会挡住创作者），安全组也不收窄。
+> 代价是限速器成为唯一守门人 —— 而它在并发下不准（见修复清单 W1），
+> 该项优先级因此上升；`/api/cover` 的资源与内容类型防护（本版 F2）同理更重要。
+
+验证：`ops/tests` 80 项全绿；隔离进程验证 F1/F2/F3/F5 全部通过（含真封面图未误伤）；
+生产接口 3/3；`/admin` 模板已重新渲染；重启后无异常日志。
+另清理了我此前以 root 跑 `py_compile` 留下的 root 属主 `.pyc`（现改用 `ast.parse` 自检）。
+
 ### 优化（v1.7.5 · 2026-09-27）· 用户可见文案：不再向用户汇报「我们自己的运行状况」
 
 v1.7.4 把口语改成了书面，但仍有一类更根本的问题：**文案的主语是「我们」和「平台」，

@@ -462,6 +462,12 @@ def _optimize_response(response):
                 response.headers["Content-Encoding"] = "gzip"
                 response.headers["Vary"] = "Accept-Encoding"
                 response.headers["Content-Length"] = str(len(gz))
+
+    # 基础安全响应头（本服务公网可直连，属低成本基础防护）。
+    # 刻意不设 CSP：页面含内联 <script>/<style> 并引用外部资源，配错会直接白屏。
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     return response
 
 
@@ -1027,7 +1033,10 @@ def api_admin_errors():
     conn = _get_db()
     rows = conn.execute(
         """
-        SELECT error, COUNT(*) c FROM history
+        SELECT error,
+               MAX(CASE WHEN error_kind != '' THEN error_kind END) AS kind,
+               COUNT(*) c
+        FROM history
         WHERE created_at >= ? AND status != 'success' AND error != ''
         GROUP BY error ORDER BY c DESC LIMIT 30
         """, (since,)
@@ -1042,7 +1051,12 @@ def api_admin_errors():
         """, (since,)
     ).fetchall()
     conn.close()
-    errors = [{"error": r["error"][:200], "count": r["c"]} for r in rows]
+    # 带上 error_kind：前端「处理建议」按类型判定，不再靠匹配报错文案
+    # （文案会随产品迭代变化，靠它做逻辑必然失配 —— v1.7.4/1.7.5 就发生过）。
+    errors = [
+        {"error": r["error"][:200], "count": r["c"], "error_kind": r["kind"] or ""}
+        for r in rows
+    ]
     error_kinds = [{"kind": r["k"], "count": r["c"]} for r in kind_rows]
     return jsonify({"success": True, "range": window, "errors": errors, "error_kinds": error_kinds})
 
@@ -1549,6 +1563,14 @@ def api_admin_pool_deepcheck():
 
 _cover_cache: dict[str, tuple[bytes, str, float]] = {}
 COVER_CACHE_SECONDS = 60 * 60 * 24  # 封面缓存 24 小时
+# 只放行真正的位图格式。**不要用 image/* 通配**：image/svg+xml 是可执行脚本的
+# （直接访问该 URL 时会执行），而这正是本接口要挡住的那类内容。
+_ALLOWED_IMAGE_TYPES = frozenset({
+    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
+    "image/bmp", "image/avif", "image/heic", "image/heif",
+})
+COVER_MAX_BYTES = 5 * 1024 * 1024           # 单张封面大小上限
+COVER_CACHE_MAX_BYTES = 64 * 1024 * 1024    # 封面缓存总字节上限
 _ALLOWED_IMAGE_HOSTS = (
     "douyinpic.com", "douyinimg.com", "douyinvod.com",
     "xhscdn.com", "xiaohongshu.com",
@@ -1596,15 +1618,45 @@ def _fetch_cover_with_redirect_check(url: str, timeout: int = 15, max_redirects:
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"},
             timeout=timeout,
             allow_redirects=False,
+            stream=True,  # 不一次性读进内存：由调用方按上限读取
         )
         if resp.status_code in (301, 302, 303, 307, 308):
             location = resp.headers.get("Location", "")
             if not location:
                 return resp
             current = _urljoin(current, location)
+            resp.close()  # stream=True，跳转响应体不读，显式释放连接
             continue
         return resp
     raise RuntimeError("重定向次数过多")
+
+
+def _read_limited(resp, limit: int) -> bytes:
+    """按上限流式读取响应体，超限即抛错。
+
+    本接口豁免口令且公网可直连，**不能**把上游响应整个读进内存 ——
+    一个几 GB 的响应就能把单 worker 打爆。
+    """
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_content(64 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError("封面文件超过大小上限")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _cover_cache_trim() -> None:
+    """封面缓存双上限淘汰：条数超 300 或总字节超上限时，淘汰最旧的一半。"""
+    total_bytes = sum(len(v[0]) for v in _cover_cache.values())
+    if len(_cover_cache) <= 300 and total_bytes <= COVER_CACHE_MAX_BYTES:
+        return
+    stale = sorted(_cover_cache.items(), key=lambda kv: kv[1][2])[: max(1, len(_cover_cache) // 2)]
+    for k, _v in stale:
+        _cover_cache.pop(k, None)
 
 
 @app.route("/api/cover")
@@ -1625,20 +1677,36 @@ def api_cover():
         data, ctype, _ts = cached
         resp = app.response_class(data, mimetype=ctype)
         resp.headers["Cache-Control"] = "public, max-age=86400"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
 
     try:
         r = _fetch_cover_with_redirect_check(url)
-        if r.status_code != 200 or not r.content:
+        if r.status_code != 200:
             return "fetch failed", 502
-        ctype = r.headers.get("Content-Type", "image/jpeg").split(";")[0]
-        _cover_cache[url] = (r.content, ctype, now)
-        if len(_cover_cache) > 300:  # 防内存膨胀：淘汰最旧的一半（保留热数据）
-            _stale = sorted(_cover_cache.items(), key=lambda kv: kv[1][2])[: len(_cover_cache) // 2]
-            for k, _v in _stale:
-                _cover_cache.pop(k, None)
-        resp = app.response_class(r.content, mimetype=ctype)
+        # ⚠️ 不能透传上游 Content-Type：域名白名单里有 xiaohongshu.com 整站，
+        # 透传会让本接口变成「同源 HTML 代理」——本站域名可承载任意白名单域名下的
+        # HTML，还能被浏览器缓存 24h（曾被实测复现）。只认位图格式，其余一律拒绝。
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype not in _ALLOWED_IMAGE_TYPES:
+            app.logger.warning(
+                "封面接口拒绝非图片响应: %s -> %s", url[:80], ctype or "(无 Content-Type)"
+            )
+            return "unsupported content type", 502
+        try:
+            declared = int(r.headers.get("Content-Length") or 0)
+        except ValueError:
+            declared = 0
+        if declared > COVER_MAX_BYTES:
+            return "too large", 502
+        data = _read_limited(r, COVER_MAX_BYTES)
+        if not data:
+            return "fetch failed", 502
+        _cover_cache[url] = (data, ctype, now)
+        _cover_cache_trim()
+        resp = app.response_class(data, mimetype=ctype)
         resp.headers["Cache-Control"] = "public, max-age=86400"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
     except Exception:
         return "fetch error", 502

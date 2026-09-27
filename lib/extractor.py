@@ -1243,7 +1243,13 @@ def _extract_xhs_initial_state(
         raise PageStructureError("暂时无法获取该笔记内容")
     state_blob = state_match.group(1)
     state_blob = re.sub(r":undefined([,}])", r":null\1", state_blob)
-    state = json.loads(state_blob)
+    # 小红书偶尔返回裸 undefined（window.__INITIAL_STATE__=undefined），json.loads 会抛
+    # JSONDecodeError；它继承 ValueError，会被 extract_link 当成"业务错误"，
+    # 于是这句 Python 报错原文就显示在用户的「错误信息」栏里。
+    try:
+        state = json.loads(state_blob)
+    except ValueError as exc:
+        raise PageStructureError("暂时无法获取该笔记内容") from exc
 
     note, structure_broken = _xhs_note_from_state(state)
     if not isinstance(note, dict):
@@ -2061,8 +2067,11 @@ def extract_link(raw: str) -> ExtractResult:
     except Exception as e:
         # 归因按**异常类型**走（error_kind_of），不再对报错文案做关键词匹配。
         kind = error_kind_of(e)
-        # 已知业务错误（作品不存在/缺参数等）对用户有用，保留友好文案；只进日志，不泄露堆栈
-        if isinstance(e, (ValueError, RuntimeError)):
+        # 只信我们自己定义的业务异常（ExtractError 及其子类）能带用户文案。
+        # 此前这里是 (ValueError, RuntimeError) —— 任何库抛的 ValueError 都会被原样透传
+        # （典型：json.JSONDecodeError → 用户看到 "Expecting value: line 1 column 1 (char 0)"）。
+        # 未知异常一律走下面的脱敏分支，详细堆栈只进日志。
+        if isinstance(e, ExtractError):
             logger.warning("提取失败 [%s]: %s | 原因: %s", kind, url[:80], e)
             telemetry["total_ms"] = round((time.perf_counter() - started) * 1000)
             logger.info("性能分解 [failed] %s", " ".join(f"{k}={v}ms" for k, v in telemetry.items() if k.endswith("_ms")))
