@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import gzip
-import base64
 import hashlib
 import hmac
 import json
@@ -23,13 +22,13 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import csv
 import io
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
-from functools import wraps
 from pathlib import Path
 from urllib.parse import urljoin as _urljoin
 from urllib.parse import urlparse as _urlparse
@@ -182,10 +181,7 @@ def _check_admin_token():
         if request.method in ("POST", "PUT", "PATCH", "DELETE") and not hmac.compare_digest(request.headers.get("X-CSRF-Token", ""), request.cookies.get("csrf_token", "")):
             return jsonify({"success": False, "error": "CSRF 校验失败"}), 403
         return None
-    if not provided:
-        return jsonify({"success": False, "error": "管理员口令错误或未提供"}), 401
     return jsonify({"success": False, "error": "管理员口令错误或未提供"}), 401
-    return None
 
 
 @app.after_request
@@ -198,13 +194,64 @@ def _log_request_end(response):
 
 # ---------------------------------------------------------------- 数据库
 
-def _get_db():
+class _DbHandle:
+    """线程独占的 SQLite 长连接句柄（薄代理）。
+
+    为什么要代理：本文件几乎所有使用点都写成 `finally: conn.close()`。
+    如果 _get_db() 直接返回复用的 Connection，第一次 close 就会把长连接关掉，
+    同线程后续拿到的是已关闭连接。这里把 close() 的语义改成「回滚未提交事务」，
+    连接本身留在 thread-local 里继续复用；其余属性一律转发底层连接。
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def close(self):
+        """不真正关闭：只丢弃未提交事务，连接留给本线程复用。"""
+        try:
+            self._conn.rollback()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+_db_local = threading.local()
+
+
+def _new_db_conn():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    # WAL 模式：并发读写不互相阻塞，提升多线程写库性能
+    # WAL：并发读写不互相阻塞；synchronous=NORMAL 是 WAL 下的官方推荐搭配
+    # （只在 checkpoint 时 fsync，写入快很多；掉电最坏丢最近几笔事务，不会损坏库）
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+def _get_db():
+    """取当前线程的 SQLite 连接（首次调用建立，之后复用）。
+
+    ⚠️ 复用只在本进程内成立：gunicorn `-w 1` 单进程 4 线程 → 每线程一条连接。
+    sqlite3 连接不可跨线程/跨 fork 使用，若将来改成 `-w >1` 或加 `--preload`，
+    这里必须改回「每请求新建 + 真关闭」。
+    """
+    handle = getattr(_db_local, "handle", None)
+    if handle is None:
+        handle = _DbHandle(_new_db_conn())
+        _db_local.handle = handle
+    return handle
 
 
 def _init_db():
@@ -370,48 +417,111 @@ def _device_cookie_payload(device_id: str, signature: str):
     return {"device_id": device_id, "device_sig": signature}
 
 
-# ---------------------------------------------------------------- 速率限制（SQLite 持久化）
+# ---------------------------------------------------------------- 速率限制（内存滑动窗口 + 定期落库）
 
 RATE_IP_PER_MINUTE = int(os.environ.get("RATE_IP_PER_MINUTE", "20"))      # 每 IP 每分钟
 RATE_DEVICE_PER_MINUTE = int(os.environ.get("RATE_DEVICE_PER_MINUTE", "15"))  # 每设备每分钟
 _RATE_WINDOW = 60  # 秒
-_rate_write_count = 0  # 限速写计数，用于周期性清理过期桶
+
+# 2026-09-27：原来是「查 SQLite → 改 list → 写回」，三步之间没有事务也没有锁，
+# 单进程 4 线程会各自读到同一份旧数据再互相覆盖 ——
+# 实测并发 40 次 / 限额 20 → 放行 40 次（超额 2 倍）；且每次检查都要抢一次写锁
+# （40 次共 545ms，空载单次仅 0.32ms）。
+# 现在改为进程内内存滑动窗口（gunicorn `-w 1` 单进程 4 线程天然共享，加锁即正确），
+# 再定期把窗口快照落回 rate_limits 表（保留原表结构，重启后计数不重置）。
+_rate_lock = threading.Lock()
+_rate_buckets = {}          # bucket_key -> 窗口内时间戳列表（升序）
+_rate_persist_lock = threading.Lock()
+_rate_last_persist = 0.0
+_RATE_PERSIST_INTERVAL = 15   # 秒：最多每 15 秒落库一次
+_RATE_GC_THRESHOLD = 2000     # 内存桶数超过此值时顺带清理过期桶
+
+
+def _rate_gc_locked(now: float):
+    """清掉窗口外的桶（调用方须持有 _rate_lock）。"""
+    cutoff = now - _RATE_WINDOW
+    for key in [k for k, v in _rate_buckets.items() if not v or v[-1] <= cutoff]:
+        del _rate_buckets[key]
 
 
 def _check_rate_limit(bucket_key: str, limit: int) -> bool:
-    """SQLite 持久化的滑动窗口限速；超限返回 False。"""
-    global _rate_write_count
+    """进程内滑动窗口限速；超限返回 False。"""
     now = time.time()
     cutoff = now - _RATE_WINDOW
-    conn = _get_db()
     try:
-        row = conn.execute(
-            "SELECT timestamps FROM rate_limits WHERE bucket_key = ?", (bucket_key,)
-        ).fetchone()
-        try:
-            timestamps = json.loads(row["timestamps"]) if row else []
-        except (ValueError, TypeError):
-            timestamps = []
-        # 清理窗口外的旧时间戳
-        timestamps = [t for t in timestamps if t > cutoff]
-        if len(timestamps) >= limit:
-            return False
-        timestamps.append(now)
-        conn.execute(
-            "INSERT OR REPLACE INTO rate_limits (bucket_key, timestamps, updated_at) VALUES (?,?,?)",
-            (bucket_key, json.dumps(timestamps), now),
-        )
-        # 定期清理过期桶（防止表无限增长；每 ~100 次写入触发一次）
-        _rate_write_count += 1
-        if _rate_write_count % 100 == 0:
-            conn.execute("DELETE FROM rate_limits WHERE updated_at < ?", (now - 3600,))
-        conn.commit()
-        return True
+        with _rate_lock:
+            timestamps = [t for t in _rate_buckets.get(bucket_key, ()) if t > cutoff]
+            if len(timestamps) >= limit:
+                _rate_buckets[bucket_key] = timestamps
+                return False
+            timestamps.append(now)
+            _rate_buckets[bucket_key] = timestamps
+            if len(_rate_buckets) > _RATE_GC_THRESHOLD:
+                _rate_gc_locked(now)
     except Exception:
         # 限速失败时放行（避免限速器本身成为故障点）
         return True
+    _persist_rate_buckets()
+    return True
+
+
+def _persist_rate_buckets(force: bool = False):
+    """把内存窗口快照落库（节流 + 非阻塞：抢不到锁或不到间隔就跳过）。"""
+    global _rate_last_persist
+    now = time.time()
+    if not force and now - _rate_last_persist < _RATE_PERSIST_INTERVAL:
+        return
+    if not _rate_persist_lock.acquire(blocking=False):
+        return
+    try:
+        with _rate_lock:
+            _rate_last_persist = now
+            if not _rate_buckets:
+                return
+            snapshot = {k: list(v) for k, v in _rate_buckets.items()}
+        conn = _get_db()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO rate_limits (bucket_key, timestamps, updated_at) VALUES (?,?,?)",
+                [(k, json.dumps(v), now) for k, v in snapshot.items()],
+            )
+            conn.execute("DELETE FROM rate_limits WHERE updated_at < ?", (now - 3600,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        log.debug("rate_limits 落库失败（不影响限速本身）", exc_info=True)
     finally:
-        conn.close()
+        _rate_persist_lock.release()
+
+
+def _load_rate_buckets():
+    """启动时把未过期窗口载入内存（服务重启不重置限速计数）。"""
+    now = time.time()
+    cutoff = now - _RATE_WINDOW
+    try:
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                "SELECT bucket_key, timestamps FROM rate_limits WHERE updated_at >= ?",
+                (now - 3600,),
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            try:
+                ts = [t for t in json.loads(row["timestamps"]) if t > cutoff]
+            except (ValueError, TypeError):
+                continue
+            if ts:
+                _rate_buckets[row["bucket_key"]] = ts
+        if _rate_buckets:
+            log.info("限速窗口已载入：%d 个活跃桶", len(_rate_buckets))
+    except Exception:
+        log.debug("限速窗口载入失败（从零开始计数）", exc_info=True)
+
+
+_load_rate_buckets()
 
 
 def _rate_limit_check(ip: str, device_id: str) -> bool:
@@ -462,6 +572,13 @@ def _optimize_response(response):
                 response.headers["Content-Encoding"] = "gzip"
                 response.headers["Vary"] = "Accept-Encoding"
                 response.headers["Content-Length"] = str(len(gz))
+
+    # 可压缩类型的响应一律声明 Vary（不管本次是否真的压缩了）：
+    # 否则缓存可能存下「未压缩版本」，之后带 gzip 的请求也拿不到压缩版
+    if response.content_type and response.content_type.startswith(
+        ("text/", "application/json", "application/javascript")
+    ):
+        response.headers.setdefault("Vary", "Accept-Encoding")
 
     # 基础安全响应头（本服务公网可直连，属低成本基础防护）。
     # 刻意不设 CSP：页面含内联 <script>/<style> 并引用外部资源，配错会直接白屏。
