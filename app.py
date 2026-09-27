@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import random
 import re
@@ -547,6 +548,7 @@ def _optimize_response(response):
     2. text/json 响应 gzip 压缩（传输体积降 ~70%）
     """
     # 静态资源缓存（manifest/图标等；sw.js 不缓存避免更新失效）
+    # 注意：/assets/（2.0 产物）的缓存头在 assets() 路由里单独设，不走这里。
     if request.path.startswith("/static/") and "/sw.js" not in request.path:
         response.headers.setdefault("Cache-Control", "public, max-age=3600")
 
@@ -557,6 +559,8 @@ def _optimize_response(response):
         and not response.direct_passthrough
         and not response.is_streamed
         and "Accept-Ranges" not in response.headers
+        # 已压缩过的（如 /assets/ 路由预压缩产物）不能再压一次，否则双重 gzip
+        and not response.headers.get("Content-Encoding")
         and "gzip" in (request.headers.get("Accept-Encoding") or "")
         and response.content_type
         and response.content_type.startswith(("text/", "application/json", "application/javascript"))
@@ -586,6 +590,54 @@ def _optimize_response(response):
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     return response
+
+
+# ------------------------------------------------------- 2.0 前端产物（vite）
+# frontend/ 的构建输出。文件名带内容 hash → 可以长缓存；Flask 侧补 gzip。
+_ASSET_DIR = BASE_DIR / "app" / "static" / "dist" / "assets"
+_ASSET_CACHE: dict = {}  # rel -> (raw, gz, ctype)
+_ASSET_CACHE_MAX = 64
+
+
+def _v2_index_ready() -> bool:
+    """v2 产物是否就绪；没跑过 build 时回退 v1，保证 clone 下来直接能跑。"""
+    return (BASE_DIR / "app" / "static" / "dist" / "index.html").is_file()
+
+
+@app.route("/assets/<path:rel>")
+def assets(rel):
+    """发 vite 产物（2.0）。
+
+    不用 send_from_directory：它返回 direct_passthrough 流式响应，
+    会被 _optimize_response() 的 gzip 分支跳过，导致 JS/CSS 未压缩传输。
+    这里自己读盘 + 预压缩 + 长缓存（文件名带 hash，内容变则文件名变）。
+    """
+    if ".." in rel or rel.startswith("/"):
+        return jsonify({"success": False, "error": "not found"}), 404
+    root = _ASSET_DIR.resolve()
+    target = (_ASSET_DIR / rel).resolve()
+    if not str(target).startswith(str(root) + os.sep) or not target.is_file():
+        return jsonify({"success": False, "error": "not found"}), 404
+
+    entry = _ASSET_CACHE.get(rel)
+    if entry is None:
+        raw = target.read_bytes()
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        entry = (raw, gzip.compress(raw, compresslevel=5), ctype)
+        if len(_ASSET_CACHE) >= _ASSET_CACHE_MAX:
+            _ASSET_CACHE.clear()
+        _ASSET_CACHE[rel] = entry
+    raw, gz, ctype = entry
+
+    use_gz = "gzip" in (request.headers.get("Accept-Encoding") or "")
+    resp = Response(gz if use_gz else raw)
+    resp.headers["Content-Type"] = ctype
+    if use_gz:
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Content-Length"] = str(len(gz))
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    resp.headers["Vary"] = "Accept-Encoding"
+    return resp
 
 
 @app.route("/api/health", methods=["GET"])
@@ -1833,7 +1885,35 @@ def api_cover():
 
 @app.route("/")
 def index():
-    return send_from_directory("app/templates", "index.html")
+    """默认 v1（app/templates）；?v2=1 或 cookie ui=v2 走 2.0 产物。
+
+    灰度通道：v2 产物缺失时自动回退 v1；?v2=0/1 会把选择写进 cookie，
+    之后直接访问 / 就走对应版本（便于给创作者发一条带参数的链接长期试用）。
+    """
+    want_v2 = request.args.get("v2")
+    if want_v2 == "1":
+        use_v2 = True
+    elif want_v2 == "0":
+        use_v2 = False
+    else:
+        use_v2 = request.cookies.get("ui") == "v2"
+    if use_v2 and not _v2_index_ready():
+        log.warning("v2 产物缺失，回退 v1 首页")
+        use_v2 = False
+
+    resp = (
+        send_from_directory("app/static/dist", "index.html")
+        if use_v2
+        else send_from_directory("app/templates", "index.html")
+    )
+    if want_v2 in ("0", "1"):
+        resp.set_cookie("ui", "v2" if want_v2 == "1" else "v1",
+                        max_age=90 * 24 * 3600, samesite="Lax", path="/")
+    # HTML 必须每次重验证：它写死了 hash 资源名，缓存旧 HTML 会指向已删文件 → 白屏。
+    # （2026-09-27 实测：Flask 对未配置 max_age 的文件响应默认就是 no-cache，
+    #   现状本来安全；显式写出来是为了表达意图 + 防 Flask 版本行为变化。）
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/admin")

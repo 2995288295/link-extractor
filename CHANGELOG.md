@@ -4,6 +4,51 @@
 
 ## [未发布]
 
+### 新增（v1.8.0 · 2026-09-27）· 2.0 第一期：用户页施工脚手架
+
+来自 `docs/2026-09-27-2.0改造方案-方案A.md` §5。**唯一目标：拆模块 + 跑通构建链 + 建灰度通道，
+界面看起来必须一模一样。执行策略是「只搬不改」——函数体原样搬运。**
+
+**为什么先做这个而不是直接换皮**：先换地基再装修。出问题时能立刻分清是「搬家漏东西」
+还是「装修写错样式」；两者混在一批，排查就得同时怀疑两处。
+
+- 新增 `frontend/`（vite **8.3.1**，锁精确版本而非 `^8.3.1`）+ `app/static/dist/`。
+  1181 行单文件拆成 **12 个 ES 模块**：`core/state·api·dom`、`ui/toast·tabs·lightbox`、
+  `features/input·extract·results·copy·stats·history`，加 `index.js` 入口。构建约 220 ms。
+  **产物入库**（服务器上没有 node，构建只能在本地做）。
+- 新增 `/assets/<path>` 路由：自己读盘 + 预压缩 + `immutable` 长缓存。
+  **不用 `send_from_directory`** —— 它返回 `direct_passthrough` 流式响应，会被
+  `_optimize_response()` 的 gzip 分支跳过，JS/CSS 将以未压缩状态传输。
+- 新增灰度通道：`/?v2=1` 走 2.0 产物、`/?v2=0` 回 v1，两者都会写入 cookie `ui`（90 天），
+  之后直接访问 `/` 即走对应版本；**产物缺失时自动回退 v1**，没跑过 build 也能正常访问。
+- `app.py` +81 行（4 处，带断言补丁，每处断言命中数恰好 1）：`import mimetypes`、
+  新增资产区与路由、首页按 `?v2`/cookie 分流、`_optimize_response` 增加
+  「已有 `Content-Encoding` 就不再压」守卫（否则已预压缩的资源会被压第二次）。
+
+**「只搬不改」的硬证据**（不是靠手测，是靠逐字节比对）：33 个函数 + 4 个顶层裸语句块
+（SW 注册 / 输入框滚动 IIFE / Esc 监听 / window load），归一化（**仅**去掉 `state.` 前缀与空白）
+后与原文**零差异**；CSS 11639 B 内容一致；9 个模块级变量与 `state` 对象字段一一对应。
+
+**唯一改名**：9 个模块级 `let` 收敛为 `state` 对象 —— ES module 导出的 `let` 对导入方是只读绑定，
+无法跨模块赋值。原实现里 `autoExtractTimer` 等 4 个变量声明（原 639-642 行）位于使用它们的
+`clearInput`（原 570 行）之后，靠「定义早于调用」侥幸成立；收敛后所有字段在模块初始化时一次到位。
+
+**验证**：隔离副本 39 项（分流 / cookie / 回退 / gzip / 缓存头 / 路径穿越 / 双重 gzip / 既有接口）
+→ 行为级 17 项 ×2（真实 Chrome + mock，v1 与 v2 各跑一遍，均 17/17：全局挂载、流式提取、
+tab 切换、封面弹层 + Esc、复制反馈、全程无 JS 报错）→ 80 项告警口径回归全绿 →
+生产实测（v1/v2 各 17 项、DOM id 集合完全一致、真实提取 3/3、资源 gzip 后 6877 B / 3014 B、穿越 404）。
+
+**有意不做**：视觉上任何变化，**包括 `theme-color`** —— 属第二期。本期只换地基。
+
+**顺带发现两处既有事实（本批未处理）**：
+1. `_optimize_response` 里 `setdefault("Cache-Control", "public, max-age=3600")` 对 `/static/*`
+   **从未生效** —— Flask 的 `send_file` 默认已带 `no-cache`，`setdefault` 不覆盖。
+   方案 §5.9 的缓存表据此有误。
+2. HTML 响应走 `direct_passthrough`，**本就不参与 gzip**（v1 同样如此），并非 2.0 引入。
+
+**踩坑**：macOS 的 `tar` 会把扩展属性打包成 `._*`（AppleDouble）条目，解压到 Linux 会变成
+垃圾文件、污染 `/assets/`。打包必须 `COPYFILE_DISABLE=1`；服务器端已核对无残留。
+
 ### 性能（v1.7.8 · 2026-09-27）· 独立批：后台看板请求量降到 1/3 以下
 
 来自 `docs/2026-09-27-2.0改造方案-方案A.md` §6。**只改 `app/templates/admin.html`，未动后端**，

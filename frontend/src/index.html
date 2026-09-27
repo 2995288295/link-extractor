@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#3a7afe">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="链接提取">
+<title>链接提取工具</title>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <div class="eyebrow">CONTENT LINK DESK</div>
+    <h1>🔗 链接提取工具</h1>
+    <p>粘贴抖音 / 小红书分享链接，批量提取转换链接与文案，逐条复制</p>
+  </header>
+
+  <div class="tab-bar" role="tablist" aria-label="功能导航">
+    <button class="tab active" id="tab-button-extract" role="tab" aria-selected="true" aria-controls="tab-extract" data-tab="extract" onclick="switchTab('extract')" onkeydown="handleTabKey(event)">提取</button>
+    <button class="tab" id="tab-button-stats" role="tab" aria-selected="false" aria-controls="tab-stats" data-tab="stats" onclick="switchTab('stats')" onkeydown="handleTabKey(event)">统计</button>
+    <button class="tab" id="tab-button-history" role="tab" aria-selected="false" aria-controls="tab-history" data-tab="history" onclick="switchTab('history')" onkeydown="handleTabKey(event)">历史记录</button>
+  </div>
+
+  <!-- 提取页 -->
+  <div id="tab-extract" role="tabpanel" aria-labelledby="tab-button-extract">
+    <div class="card">
+      <label class="input-label" for="inputUrls">输入链接</label>
+      <div class="disclaimer" role="note"><strong>使用提示：</strong>本工具仅用于链接整理和信息辅助提取，不保证结果 100% 准确、完整或持续有效。平台页面、分享链接和访问权限可能发生变化，请在使用提取结果前逐条核对链接、文案及其他信息。因使用本工具或未核对提取结果造成的任何后果，由使用者自行判断并承担。</div>
+      <textarea id="inputUrls" placeholder="粘贴抖音/小红书分享链接，每行一个，也支持整段复制（自动识别其中的链接）&#10;&#10;粘贴后 1 秒自动开始提取" oninput="onInputChange()"></textarea>
+      <div class="link-count" id="linkCount"></div>
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnExtract" onclick="doExtract()">🔍 提取全部</button>
+        <button class="btn btn-ghost" onclick="clearInput()">清空</button>
+        <button class="btn btn-ghost hidden" id="btnRetryFailed" onclick="retryFailedLinks()">🔄 重试失败项</button>
+      </div>
+      <div class="status" id="extractStatus" role="status" aria-live="polite" aria-atomic="true"></div>
+    </div>
+    <div id="results"></div>
+  </div>
+
+  <!-- 统计页 -->
+  <div id="tab-stats" class="hidden" role="tabpanel" aria-labelledby="tab-button-stats">
+    <div class="stats-grid" id="statsGrid"></div>
+    <div class="card" style="margin-top:16px;">
+      <h2>近 7 天提取趋势</h2>
+      <div id="statsTrend"></div>
+    </div>
+  </div>
+
+  <!-- 历史页 -->
+  <div id="tab-history" class="hidden" role="tabpanel" aria-labelledby="tab-button-history">
+    <div class="card">
+      <div class="toolbar" style="margin-top:0;">
+        <button class="btn btn-ghost" onclick="loadHistory()">🔄 刷新</button>
+        <button class="btn btn-danger" id="btnClearHistory" onclick="clearHistory()">🗑 清空历史</button>
+      </div>
+      <div class="status" id="historyStatus" role="status" aria-live="polite" aria-atomic="true"></div>
+    </div>
+    <div id="historyList"></div>
+  </div>
+
+  <footer>
+    <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取 · 使用前请核对提取结果</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.8.0</div>
+  </footer>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<div class="cover-preview hidden" id="coverPreview" role="dialog" aria-modal="true" aria-labelledby="coverPreviewTitle" onclick="closeCoverPreviewOnBackdrop(event)">
+  <div class="preview-dialog">
+    <button class="preview-close" id="coverPreviewClose" type="button" onclick="closeCoverPreview()" aria-label="关闭封面预览">×</button>
+    <img class="preview-image" id="coverPreviewImage" alt="">
+    <p id="coverPreviewTitle" class="hidden">封面预览</p>
+  </div>
+</div>
+
+
+<script type="module" src="./index.js"></script>
+</body>
+</html>
