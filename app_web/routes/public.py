@@ -1,0 +1,357 @@
+"""用户侧 API（P5 拆包自 app.py）。
+
+`/api/extract` 是 NDJSON 流式接口：每条链接完成即 yield 一行，前端逐条渲染。
+并发由 `config._extract_queue`（进程级线程池）承载；单批并发由
+`_effective_extract_concurrency()` 在「月底月初保守模式」下自动降档。
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import re
+import time
+from concurrent.futures import FIRST_COMPLETED, wait
+from datetime import datetime, timedelta
+
+from flask import Response, jsonify, request
+from lib.extractor import extract_link
+
+from .. import app
+from ..config import SERVICE_STARTED_AT, _effective_extract_concurrency, _extract_queue, log
+from ..db import _get_db
+from ..outcome import _classify_outcome
+from ..ratelimit import _rate_limit_check
+from ..security import _device_cookie_payload, _get_device
+
+
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat(), "uptime_seconds": round(time.time() - SERVICE_STARTED_AT)})
+
+
+
+@app.route("/api/like", methods=["POST"])
+def api_like():
+    """单链接真实点赞查询（标准 JSON，供自动化流程/飞书工作流调用）。
+
+    与 /api/extract 的 NDJSON 流式不同，本接口固定返回标准 JSON，
+    只提取 like_count 等核心字段，便于下游系统直接解析。
+    请求体：{"url": "https://..."}，支持传入单个链接或混合文本。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    # 无有效设备签名时跳过设备限速（防伪造设备每次换新绕过），仅靠 IP 限速兜底
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("url", "") or data.get("urls", "") or ""
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    raw = str(raw).strip()
+    if not raw:
+        return jsonify({"success": False, "error": "请提供视频链接"}), 400
+
+    started_at = time.monotonic()
+    result = extract_link(raw)
+    if not result.success:
+        return jsonify({
+            "success": False,
+            "platform": result.platform_raw or "",
+            "error": result.error or "提取失败",
+            "hint": result.hint or "",
+            "fetch_ms": round((time.monotonic() - started_at) * 1000),
+        }), 200
+
+    return jsonify({
+        "success": True,
+        "like_count": result.like_count,
+        "platform": result.platform,
+        "platform_raw": result.platform_raw,
+        "post_id": result.post_id,
+        "canonical_url": result.canonical_url,
+        "author_name": result.author_name,
+        "publish_time": result.publish_time,
+        "fetch_ms": round((time.monotonic() - started_at) * 1000),
+    })
+
+
+
+@app.route("/api/extract", methods=["POST"])
+def api_extract():
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    # 无有效设备签名时跳过设备限速（防伪造设备每次换新绕过），仅靠 IP 限速兜底
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    data = request.get_json(silent=True) or {}
+    raw = data.get("urls", "")
+    # 压测/诊断可显式关闭历史落库，避免把公开样本混入用户转换记录。
+    # 未传该字段时仍按原行为保存，保持现有前端和统计逻辑不变。
+    record_history = data.get("record_history") is not False
+
+    # 归一化为行列表：兼容字符串（含换行）和数组
+    if isinstance(raw, str):
+        lines = [ln.strip() for ln in raw.replace("\r\n", "\n").split("\n") if ln.strip()]
+    elif isinstance(raw, list):
+        lines = [str(u).strip() for u in raw if str(u).strip()]
+    else:
+        lines = []
+
+    # 从每行中提取所有 URL（兼容整段混合文本：文案+多个链接同一行）
+    # 分享文案常在链接末尾附带中文标点，提取前统一清掉，并保持首次出现顺序去重。
+    urls = []
+    seen_urls = set()
+    for line in lines:
+        found = re.findall(r"https?://[^\s\u4e00-\u9fff]+", line)
+        candidates = found or [line]  # 无 URL 的行保留原样，由提取器给出友好错误
+        for candidate in candidates:
+            normalized = candidate.rstrip(".,;:!?，。；：！？）】》")
+            if normalized and normalized not in seen_urls:
+                urls.append(normalized)
+                seen_urls.add(normalized)
+
+    if not urls:
+        return jsonify({"success": False, "error": "请粘贴至少一个链接"}), 400
+    if len(urls) > 20:
+        return jsonify({"success": False, "error": "一次最多提取 20 条链接"}), 400
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _save_to_db(item: dict) -> None:
+        """单条结果入库（并发线程各自连接）。"""
+        c = _get_db()
+        try:
+            c.execute(
+                """
+                INSERT INTO history
+                (device_id, original_url, canonical_url, platform, title, caption,
+                 author_name, publish_time, like_count, video_url, cover_url, status, error, duration_ms, cache_hit, outcome_class,
+                 error_kind, retry_count, success_attempt, retry_reason, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    device_id, item["original_url"], item["canonical_url"], item["platform"],
+                    item["title"], item["caption"], item["author_name"], item["publish_time"],
+                    item["like_count"], item["video_url"], item["cover_url"],
+                    "success" if item["success"] else "error",
+                    item["error"] if not item["success"] else "",
+                    item["duration_ms"], int(item["cache_hit"]), item["outcome_class"],
+                    item.get("error_kind", "") or "",
+                    int((item.get("telemetry") or {}).get("retry_count") or 0),
+                    int((item.get("telemetry") or {}).get("success_attempt") or 0),
+                    str((item.get("telemetry") or {}).get("retry_reason") or ""),
+                    now,
+                ),
+            )
+            c.commit()
+        finally:
+            c.close()
+
+    def _process_one(url: str) -> dict:
+        """提取单条链接（带随机抖动，避免节奏规律触发风控）。"""
+        started_at = time.monotonic()
+        time.sleep(random.uniform(0, 0.5))
+        result = extract_link(url)
+        item = {
+            "original_url": url,
+            "success": result.success,
+            "platform": result.platform,
+            "platform_raw": result.platform_raw,
+            "title": result.title,
+            "caption": result.caption,
+            "author_name": result.author_name,
+            "publish_time": result.publish_time,
+            "like_count": result.like_count,
+            "video_url": result.video_url,
+            "canonical_url": result.canonical_url,
+            "cover_url": result.cover_url,
+            "post_id": result.post_id,
+            "error": result.error,
+            "hint": result.hint,
+            "partial": result.partial,
+            "cache_hit": result.cache_hit,
+            "telemetry": result.telemetry,
+            "error_kind": result.error_kind,
+        }
+        # 日志
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        item["duration_ms"] = round(elapsed_ms)
+        if item["telemetry"]:
+            log.info("请求性能分解 [%s] %s", result.platform_raw or "unknown", " ".join(f"{k}={v}ms" for k, v in item["telemetry"].items() if k.endswith("_ms")))
+        item["outcome_class"] = _classify_outcome(result.success, result.error, result.error_kind)
+        if result.success:
+            log.info("提取成功%s [%s] %s -> %s (作者:%s 点赞:%d 耗时:%.0fms)",
+                     "(仅转换)" if item.get("partial") else "",
+                     result.platform, url[:60], result.canonical_url,
+                     result.author_name or "-", result.like_count, elapsed_ms)
+        else:
+            log.warning("提取失败 [%s] 错误:%s (耗时:%.0fms)", url[:60], result.error, elapsed_ms)
+        if record_history:
+            _save_to_db(item)
+        return item
+
+    def _stream():
+        """并发提取，每条完成立即 yield（ndjson），前端逐条渲染。"""
+        batch_started_at = time.monotonic()
+        # 先发头帧（携带设备标识，前端保存）
+        payload = {"type": "start", "total": len(urls)}
+        payload.update(_device_cookie_payload(device_id, device_sig))
+        yield json.dumps(payload, ensure_ascii=False) + "\n"
+        done = 0
+        success_count = 0
+        url_iter = iter(enumerate(urls))
+        futures = {}
+        batch_concurrency = _effective_extract_concurrency()
+        for _ in range(min(batch_concurrency, len(urls))):
+            source_index, url = next(url_iter)
+            futures[_extract_queue.submit(_process_one, url)] = (source_index, url)
+        while futures:
+            ready, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for fut in ready:
+                source_index, url = futures[fut]
+                del futures[fut]
+                try:
+                    item = fut.result()
+                except Exception as e:
+                    log.exception("并发提取异常: %s", url[:60])
+                    item = {
+                        "original_url": url, "success": False, "platform": "", "platform_raw": "",
+                        "title": "", "caption": "", "author_name": "", "publish_time": "",
+                        "like_count": 0, "video_url": "", "canonical_url": "", "cover_url": "",
+                        "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
+                        "partial": False, "error_kind": "internal_error",
+                        "outcome_class": "internal_error",
+                    }
+                done += 1
+                success_count += int(item["success"])
+                yield json.dumps(
+                    {"type": "item", "index": done, "source_index": source_index, "data": item},
+                    ensure_ascii=False,
+                ) + "\n"
+                try:
+                    next_index, next_url = next(url_iter)
+                    futures[_extract_queue.submit(_process_one, next_url)] = (next_index, next_url)
+                except StopIteration:
+                    pass
+        # 收尾：仅在本次确实写入历史时清理该设备超限记录。
+        if record_history:
+            try:
+                c = _get_db()
+                c.execute(
+                    """
+                    DELETE FROM history WHERE device_id = ? AND id NOT IN (
+                        SELECT id FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 200
+                    )
+                    """,
+                    (device_id, device_id),
+                )
+                c.commit()
+                c.close()
+            except Exception:
+                pass
+        log.info(
+            "批量提取完成: total=%d success=%d concurrency=%d elapsed=%.0fms",
+            len(urls), success_count, batch_concurrency,
+            (time.monotonic() - batch_started_at) * 1000,
+        )
+        yield json.dumps({"type": "end", "done": done}, ensure_ascii=False) + "\n"
+
+    return Response(
+        _stream(),
+        mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+
+@app.route("/api/history", methods=["GET"])
+def api_history():
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    conn = _get_db()
+    rows = conn.execute(
+        "SELECT * FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 50", (device_id,)
+    ).fetchall()
+    conn.close()
+    items = [dict(row) for row in rows]
+    resp = {"success": True, "items": items}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
+
+
+
+@app.route("/api/history", methods=["DELETE"])
+def api_history_clear():
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    conn = _get_db()
+    conn.execute("DELETE FROM history WHERE device_id = ?", (device_id,))
+    conn.commit()
+    conn.close()
+    resp = {"success": True}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
+
+
+
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """统计看板：总数/成功/失败/平台分布/近7天趋势（按设备 ID 隔离）。"""
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    conn = _get_db()
+
+    total = conn.execute(
+        "SELECT COUNT(*) c FROM history WHERE device_id = ?", (device_id,)
+    ).fetchone()["c"]
+    ok_count = conn.execute(
+        "SELECT COUNT(*) c FROM history WHERE device_id = ? AND status = 'success'",
+        (device_id,),
+    ).fetchone()["c"]
+    fail_count = total - ok_count
+
+    platform_rows = conn.execute(
+        "SELECT platform, COUNT(*) c FROM history WHERE device_id = ? AND status = 'success' GROUP BY platform",
+        (device_id,),
+    ).fetchall()
+    platform_dist = {}
+    for row in platform_rows:
+        name = {"douyin": "抖音", "xiaohongshu": "小红书"}.get(row["platform"], row["platform"] or "未知")
+        platform_dist[name] = platform_dist.get(name, 0) + row["c"]
+    # 近 7 天提取趋势（按 created_at 的日期分组）
+    trend = []
+    today = datetime.now()
+    for i in range(6, -1, -1):
+        day = today - timedelta(days=i)
+        day_str = day.strftime("%Y-%m-%d")
+        cnt = conn.execute(
+            "SELECT COUNT(*) c FROM history WHERE device_id = ? AND created_at LIKE ?",
+            (device_id, day_str + "%"),
+        ).fetchone()["c"]
+        trend.append({"date": day.strftime("%m-%d"), "count": cnt})
+
+    conn.close()
+    resp = {
+        "success": True,
+        "total": total,
+        "ok": ok_count,
+        "fail": fail_count,
+        "success_rate": round(ok_count / total * 100, 1) if total else 0,
+        "platform_dist": platform_dist,
+        "trend": trend,
+    }
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)

@@ -4,6 +4,128 @@
 
 ## [未发布]
 
+### 变更（v1.11.0 · 2026-09-27）· 第五期：后端拆分（app.py 1969 行 → app_web/ 包，行为零变化）
+
+**范围**：`app.py`（1969 行 / 84830 B 单文件）→ `app_web/` 15 个模块；`app.py` 保留为 **29 行 shim**。
+**部署入口与 HTTP 行为一个字节未变**：systemd 的 `ExecStart=… gunicorn … app:app`、
+`WorkingDirectory=/opt/link-extractor`、`python app.py`、32 条 `@app.route`（url_map 33 条规则）、
+5 个请求钩子 —— 全部逐项一致。
+
+#### 模块划分（148 个顶层节点 100% 有归属）
+
+| 文件 | 行 | 内容 |
+|---|---|---|
+| `app.py`（shim） | 29 | 只做 `from app_web import app` + `if __name__` 本地入口 |
+| `app_web/__init__.py` | 58 | 建 app 对象 → 装配钩子/路由 → 按序跑一次性初始化 |
+| `app_web/config.py` | 136 | 路径 / 口令 / 并发 / 日志装配（唯一的配置入口，不依赖兄弟模块） |
+| `app_web/db.py` | 166 | `_DbHandle` 线程内复用 + 建表 + 审计写入 |
+| `app_web/outcome.py` | 47 | 失败归因（error_kind → outcome_class） |
+| `app_web/ratelimit.py` | 152 | 进程内滑动窗口限速器（含两个阈值环境变量） |
+| `app_web/security.py` | 90 | 访问口令 / 管理员会话 / device 签名 |
+| `app_web/hooks.py` | 140 | 5 个 Flask 钩子（注册顺序 = 原文件顺序） |
+| `app_web/assets.py` | 76 | vite 产物服务（预压缩 + immutable 长缓存） |
+| `app_web/pool.py` | 174 | 爱加速代理池 CLI 封装（无 HTTP 层，可脱离 Flask 单测） |
+| `app_web/cover.py` | 182 | 封面代理（三道 SSRF 防线） |
+| `app_web/routes/*.py` | 15+357+421+234+91 | HTTP 路由层：`__init__` / `public` / `admin` / `pool` / `pages` |
+
+合计 **2368 行 / 73 个函数 / 32 处 `@app.route` / 5 个钩子 / 114 条 import**（import 全部由脚本推导，非手写）。
+
+#### 「只搬不改」的证据（脚本化，七项全绿）
+
+| 项 | 结果 |
+|---|---|
+| 字符区间切片 | 按 AST `(ext_start, end_lineno)` 取源文本，**不用行号拼接** → 杜绝漏行/错位 |
+| 顶层节点归属 | **148 / 148** 有归属，未映射即报错；每个模块声明的 parts 与归属表**严格互反** |
+| def/class 逐字节 | **73 个** AST 完全一致（另有 1 个行级覆盖，见下） |
+| 赋值/表达式原样 | **44 个**原样出现在生成物中 |
+| import 图 | 每条相对 import 的目标要么是「目标模块定义的符号」，要么是「已知子模块」 |
+| 自由名可解析 | 114 条 import 由 `symtable` 自由名 + provider 表推导，**0 个未解析** |
+| 单例唯一 | 10 个进程级单例（`_rate_buckets`/`_extract_queue`/`_db_local`/`app`/`log`…）**各只定义一次** |
+
+#### 全仓只有 3 处**必须**改（其余源码一个字符未动）
+
+1. **`BASE_DIR`**（`config.py`）：原为 `Path(app.py).parent`；搬深一层后加 `.parent.parent`。
+   不改则 `DB_PATH` / `_ASSET_DIR` / dist 产物路径**全部错位**。
+2. **`Flask(__name__)` → `Flask("app_web", root_path=str(BASE_DIR), …)`**（`__init__.py`）：
+   Flask 用 `root_path` 解析相对 `static_folder` 与 `send_from_directory` 的相对目录。
+   不显式传，`/static/*` 与 `send_from_directory("app/templates", …)` 会**全部 404**。
+3. **日志 logger 名**（`config.py` 的 `setup_logging`）：拆包后 `__name__` 会变 `app_web.config`，
+   让 `journalctl | grep` 的既有排查习惯失效 → 显式写回 `"app"`。只改了一行，运行时语义等价。
+
+#### 三个 Python 特有的坑（P1/P4 的 JS 拆包没有的）
+
+1. **`from . import x` 的 `ast.ImportFrom.module` 是 `None`**，只有 `level` 记相对层数。
+   用 `module.startswith(".")` 判断相对导入会**全部漏掉** —— 首轮就踩了，
+   导致「装配层漏导入」的检查全部误报。已改为按 `level` 解析。
+2. **定义路由的模块必须被装配层导入，否则静默丢路由。** 首轮实测**漏了 `cover.py`** →
+   `/api/cover` 整个 404；而语法检查、AST 逐节点比对**全都发现不了**。
+   现生成器第 [7] 项机械断言「定义了 `@app.*` 的 **7 个**模块必须都被 import 到」。
+3. **`symtable` 对被 import 绑定的名字只置 `is_imported()`，`is_assigned()` 仍是 `False`。**
+   只用 `is_assigned()` 判「本模块绑定」→ shim 上手写的 `import os` 被误判为未绑定，
+   又自动生成了一遍（且生成的是非法的 `from . import app` —— shim 不在包内）。
+
+#### 3 处「模块级重新绑定」**一处都没改**
+
+`_rate_last_persist`（原 L479）· `_ASSET_CACHE`（原 L633 `.clear()`）· `_cover_cache`（mutation）——
+归属表**刻意**让它们与各自的定义留在同一模块，所以 `global _rate_last_persist` 与两处 mutation
+的字面代码一个字都不用动。这是归属表设计的核心约束，不是巧合。
+
+#### 四层验证（全绿）
+
+- **结构层**：上表七项
+- **隔离副本 25 项**（本机 + 服务器各跑一遍，服务器用生产同款 `venv/bin/python3`）：
+  33 条路由的 rule/methods/endpoint 一致 · 视图函数名与钩子顺序一致 ·
+  `root_path`/`static_folder`/`static_url_path`/`config` 一致 · 7 张表 + 7 个索引 + 22 个 history 列一致 ·
+  **31 条 HTTP 用例响应逐项一致**（含未鉴权 401、登录 200+cookie、`/assets` 路径穿越 404、
+  gzip/Vary/Cache-Control） · 限速器连打 25 次 **20×200 + 5×429**，且计数落在**模块级**
+  `_rate_buckets` 上（跨模块单例未拆坏） · **导入期副作用顺序**：预置限速窗口 → 导入后必须被
+  `_load_rate_buckets()` 载回（证明 bootstrap 按序执行）
+- **真 gunicorn A/B 20 项**：以生产完全相同的形态（`-w 1 --worker-class gthread --threads 4`）
+  跑新旧两个副本，含 8 线程并发与真 socket 响应头，**差异 0 个**
+- **补充冒烟**：`python app.py` 走 shim 的 `__main__` 起 dev server 正常；从**非项目根 cwd**
+  启动正常（`sys.path` / `lib` 导入不受影响）；7 个子模块单独 import 无循环依赖
+- **生产端验收 35 项**（上线后在真服务上打 `127.0.0.1:5003`，脚本 `/tmp/p5-diag/prod-accept-p5.py`，
+  口令只在服务器内读 `/etc/link-extractor.env`）：服务降权 `linkext` + cwd 正确 + `runuser` 可读
+  `app_web` 全部 15 个 `.py` · 4 条页面路径页脚均为 `v1.11.0` · **21 条路由无一 404**（P5 最大风险项）·
+  `/assets` immutable + gzip · 路径穿越 404 · 鉴权边界 401/200 · 9 条管理员只读接口全 200 ·
+  **真提取**（NDJSON `start/item/end` 结构 + 复用历史成功链接 231ms/4ms 成功 + `record_history=false`
+  确实未落库）· 限速器**额度精确计数** · 历史库 6 张核心表 + 22 列 · 日志 `[INFO] app: >>>` 前缀保真 · 无 Traceback/500
+
+  > 验收脚本自身踩的坑（已修）：`/api/admin/pool/*` 的 10 条路由函数体里**看不到**任何
+  > `_admin_require_rate`，它们统一走 `pool._pool_precheck()`（docstring：「代理池接口统一前置限速」）。
+  > 只按「路由函数直接函数体」判是否消耗限速桶 → 少算 1 个额度 → 「额度精确」断言**假失败**。
+  > 已改用 **AST 调用图跨模块可达性**推导「哪些路由最终会走到 `_admin_require_rate`」（19 条），
+  > 并用它跟脚本期望集做**严格相等**比对。教训：凡是「精确推导额度」的验收，都必须机械核对推导前提。
+
+#### 有意偏离方案 §10.1 的两处（理由已回填方案文档）
+
+1. **不引入 `create_app()` 工厂，保留模块级 `app`。** 32 处 `@app.route` 若搬进工厂作用域，
+   endpoint 名会变成 `create_app.<locals>.api_xxx`；而全仓 `url_for` / `render_template` /
+   `current_app` 命中数均为 **0** —— 工厂的可测性收益在这里是零，纯粹扩大改动面。
+2. **不引入 Blueprint，沿用 `@app.route`。** 同上：`url_for` 命中 0，Blueprint 只有改名成本。
+
+模块切分比 §10.1 的草图细一档：`http_util` 按职责一分为 `hooks` + `assets`；新增 `outcome` / `cover`；
+`pool` 拆成「CLI 封装」与「HTTP 层（`routes/pool.py`）」两块。
+
+#### 版本号
+
+页脚 `v1.9.1` / `v1.10.0` → **`v1.11.0`**（用户页与后台各 3 处：`app/templates`、`app/static/dist`、
+`frontend/src`）。**纯文本改动，不触发前端重建** —— 页脚是入口 HTML 里的静态节点，不在 bundle 中，
+故 dist 资源 hash 不变。
+
+#### 已知的、有意保留的差异
+
+- `_load_device_secret()` 里两处 `logging.getLogger(__name__).warning(...)` **未改**：拆包后会显示
+  `app_web.config`。属冷路径（服务器上 `DEVICE_SECRET` 由 systemd 注入，永不触发）。
+  主日志对象 `log` 的名字已保住，`grep 'app:'` 的排查习惯不受影响。
+- `app.logger`（仅 `api_cover` 1 处使用）的 logger 名由 `app` 变 `app_web`。
+
+#### 回滚
+
+```bash
+ssh zine-server 'cd /opt/link-extractor && git checkout v1.10.0 -- app.py app_web app/templates app/static/dist frontend && systemctl restart link-extractor'
+```
+
 ### 变更（v1.10.0 · 2026-09-27）· 第四期：后台看板 2.0（多入口构建 + 模块化，视觉零变化）
 
 **范围**：`app/templates/admin.html`（1198 行单文件）→ `frontend/src/admin.html` + `admin.js`
