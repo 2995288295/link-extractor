@@ -43,7 +43,7 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
 }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
-/* 主按钮：黄底黑字（14.8:1）。--brand-ink 是专用黑，不要用 --ink 之外的颜色 */
+/* 主按钮：蓝底白字（5.08:1）。--brand-ink 是品牌深底专用文字色（白） */
 .btn-primary { background: var(--brand); color: var(--brand-ink); font-weight: 600; }
 .btn-primary:hover:not(:disabled) { background: var(--brand-hover); }
 .btn-ghost { background: var(--surface-2); color: var(--ink); }
@@ -175,7 +175,7 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
 .copy-row .btn { flex: 1; min-width: 120px; white-space: nowrap; }
 .btn-copy { background: var(--brand); color: var(--brand-ink); font-weight: 600; }
 .btn-copy:hover:not(:disabled) { background: var(--brand-hover); }
-.btn-copy[data-kind="caption"] { background: var(--brand-soft); color: var(--brand-ink); }
+.btn-copy[data-kind="caption"] { background: var(--brand-soft); color: var(--brand-soft-ink); }
 .btn-copy[data-kind="caption"]:hover:not(:disabled) { background: var(--brand-soft-hover); }
 /* 复制成功的绿：白字压 --ok(#12A06A) 只有 3.49:1，改用 --ok-strong(5.36:1) */
 .btn-copy.copied { background: var(--ok-strong); color: #fff; }
@@ -204,7 +204,7 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   border-bottom: 3px solid transparent;
   font-weight: 500;
 }
-/* 选中态：文字用 --ink，黄色只出现在 3px 实心下划线上（方案 §4.2） */
+/* 选中态：文字用 --ink，品牌蓝只出现在 3px 实心下划线上 */
 .tab.active { color: var(--ink); border-bottom-color: var(--brand); font-weight: 600; }
 
 /* ── 统计 ─────────────────────────────────────────────────── */
@@ -225,7 +225,7 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
 .trend-line { width: 100%; height: 160px; display: block; margin-top: 8px; }
 .trend-line .grid-line { stroke: var(--border); stroke-width: 0.5; }
 .trend-line .axis-label { font-size: 11px; fill: var(--ink-2); }
-/* 折线主色走 --accent（数据色），不是品牌黄 —— 黄色当线色在浅底上几乎看不见 */
+/* 折线主色走 --accent（数据色，青），与品牌蓝分离 —— 品牌色只用于按钮/下划线 */
 .trend-line .dot {
   fill: var(--accent);
   stroke: var(--surface);
