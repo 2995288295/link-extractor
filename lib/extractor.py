@@ -129,8 +129,8 @@ _DOUYIN_LIMITED_MESSAGE = "该作品暂时无法获取"
 # 各 error_kind → 用户提示。kind 取自本文件上面的异常类定义。
 _ERROR_HINT_BY_KIND = {
     # 平台风控：窗口式软限流会自愈，系统侧已自动换 IP 重试过一次，用户只需等
-    "platform_limited": "请稍后重试",
-    "short_link_blocked": "请稍后重试",
+    "platform_limited": "请等 1 分钟后重新提交",
+    "short_link_blocked": "请等 1 分钟后重新提交",
     # 内容本身没了：重试无用，须用户自己确认
     "expired_content": "如作品仍在，请重新复制分享链接",
     # 我们这边的问题：让用户等，别让用户改输入
@@ -749,7 +749,98 @@ def _resolve_short_link(url: str) -> str:
                 with _failover_lock:
                     _risk_events.clear()
                 return retry_resolved
+    # 第一轮换 IP 重试仍被拦 → rotate 挂意图、取新租约再补一枪（带每日保险丝）。
+    # 依据（2026-09-27）：限流失败后 5 分钟内的重新提交 119/119 成功——多数失败是
+    # 瞬时软限流，新一轮请求拿到新租约即可通过。以前这一枪靠用户手动重贴完成。
+    if proxy_ready:
+        extra = _shortlink_extra_shot(platform, url, candidates)
+        if extra:
+            return extra
+    # 全部失败：记入死链候选（24h 内跨 30min 连败 >=5 次 → 后续直接秒回）。
+    _note_dead_link(url)
     raise ShortLinkBlockedError(_XHS_LIMITED_MESSAGE)
+
+
+# ------------------------------------------------- 死链识别（2026-09-27 v1.12.0）
+
+_DEAD_LINK_TTL = float(os.environ.get("DEAD_LINK_TTL_SECONDS", "86400"))
+_DEAD_LINK_MIN_FAILS = int(os.environ.get("DEAD_LINK_MIN_FAILS", "5"))
+_DEAD_LINK_MIN_SPAN = float(os.environ.get("DEAD_LINK_MIN_SPAN_SECONDS", "1800"))
+_dead_links: dict = {}
+_dead_link_lock = threading.Lock()
+
+
+def _note_dead_link(url: str) -> None:
+    """记录一次短链限流失败，用于死链识别。
+
+    判据刻意保守：24h 内连败 >=5 次 **且** 首败距今 >=30 分钟才认定疑似死链——
+    夜间高峰失败率 70%+，30 分钟内的突发连败属正常限流，不能标。
+    进程内记忆，重启即清零重新计数（无持久化成本）。
+    """
+    now = time.monotonic()
+    with _dead_link_lock:
+        entry = _dead_links.get(url)
+        if entry is None or now - entry[0] > _DEAD_LINK_TTL:
+            _dead_links[url] = [now, 1]
+        else:
+            entry[1] += 1
+        if len(_dead_links) > 1000:  # 粗暴防膨胀：删最老一半
+            for k in sorted(_dead_links, key=lambda k: _dead_links[k][0])[:500]:
+                del _dead_links[k]
+
+
+def _is_dead_link(url: str) -> bool:
+    """疑似死链（24h 内跨 30min 连败 >=5 次）→ 打平台前直接秒回。"""
+    now = time.monotonic()
+    with _dead_link_lock:
+        entry = _dead_links.get(url)
+        if not entry:
+            return False
+        if now - entry[0] > _DEAD_LINK_TTL:
+            del _dead_links[url]
+            return False
+        return entry[1] >= _DEAD_LINK_MIN_FAILS and now - entry[0] >= _DEAD_LINK_MIN_SPAN
+
+
+# ------------------------------------------------- 短链补一枪（2026-09-27 v1.12.0）
+
+_EXTRA_SHOT_MAX_PER_DAY = int(os.environ.get("AJIASU_EXTRA_SHOT_MAX_PER_DAY", "8"))
+_extra_shot_state = {"date": "", "count": 0}
+
+
+def _shortlink_extra_shot(platform: str, url: str, candidates) -> str:
+    """rotate 挂意图、取**新**租约再试一轮短链；成功返回解析结果，失败返回空串。
+
+    保险丝：每日最多 _EXTRA_SHOT_MAX_PER_DAY 次（默认 8）。补枪的租约按实际
+    握有时长计费（AJIASU_HOLD_SECONDS=60s/次），8 次封顶约 480s，在池预算
+    900s/天之内。rotate 不受 MIN_INTERVAL 限制但受 MAX_PER_HOUR 约束，
+    撞上限时 _arm_failover_intent 返回 False，自动放弃。
+    """
+    today = time.strftime("%Y-%m-%d")
+    with _failover_lock:
+        if _extra_shot_state["date"] != today:
+            _extra_shot_state.update({"date": today, "count": 0})
+        if _extra_shot_state["count"] >= _EXTRA_SHOT_MAX_PER_DAY:
+            logger.info(
+                "短链补一枪跳过 [%s]：今日已达保险丝上限 %d 次",
+                platform, _EXTRA_SHOT_MAX_PER_DAY,
+            )
+            return ""
+    if not _arm_failover_intent(platform, rotate=True):
+        return ""
+    with _failover_lock:
+        _extra_shot_state["count"] += 1
+    if not _ensure_proxy():
+        logger.info("短链补一枪未取到代理 [%s]，放弃", platform)
+        return ""
+    for headers in candidates:
+        retry_status, retry_resolved = _request_short_link(url, headers)
+        if retry_status == "ok":
+            logger.info("短链解析补一枪成功: %s → %s", url[:50], retry_resolved[:80])
+            with _failover_lock:
+                _risk_events.clear()
+            return retry_resolved
+    return ""
 
 
 def _canonicalize_media_url(platform: str, url: str, post_id: str = "") -> str:
@@ -1958,6 +2049,17 @@ def extract_link(raw: str) -> ExtractResult:
         # 提速优化：抖音提取内部已处理短链重定向，不先做 _resolve_short_link
         # 避免短链被解析成 douyin.com/video/xxx 后再被 _extract_douyin 重复请求一次
         is_xhs = "xiaohongshu" in url or "xhslink" in url
+        # 死链秒回：24h 内跨 30min 连败 >=5 次的链接不再打平台（误差代价=用户
+        # 从 App 重新复制即可绕过；收益=止损 33 连败这类炮灰请求）。
+        if is_xhs and _is_dead_link(url):
+            logger.info("死链秒回（不打平台）: %s", url[:60])
+            return ExtractResult(
+                success=False,
+                error="该笔记已删除或暂不可见",
+                hint="请从 App 重新复制分享链接",
+                error_kind="expired_content",
+                telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
+            )
 
         # 缓存优化：先从 URL 预提取作品 ID 查缓存（同一视频不同链接命中秒回）
         post_id = _extract_post_id_from_url(url)
