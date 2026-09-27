@@ -1206,6 +1206,10 @@ POOL_CONFIG_PATH = Path(os.environ.get("AJIASU_POOL_CONFIG", "/opt/ajiasu-pool/p
 POOL_LOG_PATH = Path("/var/log/ajiasu-pool.log")
 POOL_CMD_TIMEOUT = 180
 POOL_STATUS_TIMEOUT = 30
+# 历史行兼容用：老数据的 error_kind 是空串，只能靠文案匹配认出风控失败；
+# 新数据（v1.7.x 起）有 error_kind，走类型判定。两者在 _risk_trend 里是 OR 关系。
+# ⚠️ 正因为留着这段兼容，用户可见的报错文案不能随手改 —— 改前先确认
+#    lib/extractor.py 的 `_is_risk_control_error`（同样留了一处文案兜底）已解耦。
 _RISK_ERROR_MARKER = "平台暂时限制"
 
 
@@ -1308,7 +1312,8 @@ def _risk_trend(days: int = 7) -> list:
             SELECT substr(created_at, 1, 10) AS day,
                    COUNT(*) AS total,
                    SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) AS fail,
-                   SUM(CASE WHEN error LIKE ? THEN 1 ELSE 0 END) AS risk
+                   SUM(CASE WHEN error_kind IN ('platform_limited', 'short_link_blocked')
+                             OR error LIKE ? THEN 1 ELSE 0 END) AS risk
             FROM history WHERE created_at >= ?
             GROUP BY day ORDER BY day
             """,

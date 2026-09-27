@@ -112,6 +112,61 @@ class RedirectGuardError(UpstreamError):
     kind = "redirect_blocked"
 
 
+# ---------------------------------------------------------------- 用户可见文案
+# 统一原则（2026-09-27）：**一句话说清是什么事，只给一个动作**。
+# - error 字段 = 发生了什么。不暴露内部实现（不出现 filter_reason / xsec_token /
+#   「页面状态结构」这类代码术语）。
+# - hint 字段 = 下一步**一个**动作。此前出现过
+#   「请稍后重试；若持续失败请从 App 重新复制最新分享链接」这类把两个**互相打架**
+#   的动作堆在一句里的写法（等 vs 换链接），用户不知道该选哪个。
+_XHS_LIMITED_MESSAGE = "小红书平台暂时限制访问"
+_DOUYIN_LIMITED_MESSAGE = "抖音平台暂时限制访问"
+
+# 各 error_kind → 用户提示。kind 取自本文件上面的异常类定义。
+_ERROR_HINT_BY_KIND = {
+    # 平台风控：窗口式软限流会自愈，系统侧已自动换 IP 重试过一次，用户只需等
+    "platform_limited": "请稍后重试",
+    "short_link_blocked": "请稍后重试",
+    # 内容本身没了：重试无用，须用户自己确认
+    "expired_content": "请确认作品仍在，再重新复制链接",
+    # 我们这边的问题：让用户等，别让用户改输入
+    "page_changed": "请稍后重试",
+    "upstream_data_missing": "请稍后重试",
+    "upstream_error": "请稍后重试",
+    "internal_error": "请稍后重试",
+    # 输入问题：给明确的纠正动作
+    "url_truncated": "请重新从 App 复制完整链接",
+    "missing_xsec_token": "请在 App 内重新复制链接",
+    "malformed_url": "请在 App 内重新复制链接",
+    "unsupported_domain": "请粘贴抖音或小红书的分享链接",
+    "invalid_input": "请粘贴抖音或小红书的分享链接",
+    "redirect_blocked": "请粘贴抖音或小红书的分享链接",
+}
+_DEFAULT_ERROR_HINT = "请稍后重试"
+
+
+def _error_hint_for(kind: str) -> str:
+    """按错误类型给用户**一个**下一步动作。"""
+    return _ERROR_HINT_BY_KIND.get(str(kind or ""), _DEFAULT_ERROR_HINT)
+
+
+def _douyin_filter_message(reason: str, detail: str) -> str:
+    """把抖音的 filter_reason 技术代号翻成用户能读懂的一句话。
+
+    reason 形如 `status_reviewing` / `h265_video` / `360_vr_version_control`，
+    可能是 `&` 连接的多值组合；detail 是平台给的中文说明（通常为空）。
+    原始 reason/detail 由调用方写日志供排查，这里只负责别把代号抛给用户
+    （线上曾直接显示「抖音作品不可用（status_reviewing）：作品不存在或不可公开访问」）。
+    """
+    text = str(reason or "").lower()
+    if "review" in text:
+        return "该作品正在平台审核中"
+    message = str(detail or "").strip()
+    if message:
+        return message
+    return "平台未返回该作品内容"
+
+
 # 细粒度 kind → 粗粒度 outcome_class。
 # ⚠️ 粗粒度这一列必须只取「历史已有的 5 个值」：所有看板与告警的聚合查询都按它算，
 # 而且「服务失败 = 总数 − 成功 − 用户错误」是减法算出来的 ——
@@ -463,11 +518,11 @@ def _validate_url_integrity(url: str) -> str:
     if "xiaohongshu" in host:
         m = re.search(r"/(?:explore|discovery/item)/([0-9A-Za-z]+)", path)
         if m and len(m.group(1)) < 20:
-            return f"小红书链接不完整（作品 ID 仅 {len(m.group(1))} 位，标准 24 位），可能被聊天工具截断，请从 App 重新复制完整链接"
+            return "链接不完整，可能被聊天工具截断"
     elif "douyin" in host:
         m = re.search(r"/(?:video|note|share/(?:video|slides|note))/(\d+)", path, re.I)
         if m and len(m.group(1)) < 15:
-            return f"抖音链接不完整（作品 ID 仅 {len(m.group(1))} 位，标准 19 位），可能被聊天工具截断，请从 App 重新复制完整链接"
+            return "链接不完整，可能被聊天工具截断"
     return ""
 
 
@@ -497,7 +552,7 @@ def _validate_short_link_shape(url: str) -> str:
         return ""
     path = parsed.path or ""
     if _PARAM_LEAK_IN_PATH.search(path) or "=" in path:
-        return "链接格式异常（参数被写进了路径），请从 App 重新复制完整分享链接"
+        return "链接格式异常"
     return ""
 
 
@@ -555,7 +610,7 @@ def _safe_follow_redirects(session, url: str, *, headers=None, timeout=30, max_r
 def _extract_first_url(text: str) -> str:
     m = re.search(r"https?://[^\s\u4e00-\u9fff]+", text)
     if not m:
-        raise InvalidInputError("未在输入中找到链接")
+        raise InvalidInputError("未找到链接")
     return m.group(0)
 
 
@@ -690,9 +745,7 @@ def _resolve_short_link(url: str) -> str:
                 with _failover_lock:
                     _risk_events.clear()
                 return retry_resolved
-    raise ShortLinkBlockedError(
-        "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
-    )
+    raise ShortLinkBlockedError(_XHS_LIMITED_MESSAGE)
 
 
 def _canonicalize_media_url(platform: str, url: str, post_id: str = "") -> str:
@@ -961,7 +1014,7 @@ def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None)
             "hint": "链接已转换为抖音用户主页；主页不包含单条作品的文案和数据",
         }
     if not video_id:
-        raise InvalidInputError("抖音链接未包含可识别的作品 ID，可能是直播、商品或失效链接")
+        raise InvalidInputError("抖音链接未包含作品 ID，可能不是作品链接或已失效")
 
     share_url = f"https://www.iesdouyin.com/share/{share_kind}/{video_id}"
     parse_started = time.perf_counter()
@@ -1023,7 +1076,7 @@ def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None)
             fresh.close()
 
     if not video_info_res:
-        raise PlatformLimitedError("抖音页面触发验证，暂时无法获取完整文案，请稍后重试")
+        raise PlatformLimitedError(_DOUYIN_LIMITED_MESSAGE)
 
     item_list = video_info_res.get("item_list") or []
     if not item_list:
@@ -1031,9 +1084,11 @@ def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None)
             (e for e in (video_info_res.get("filter_list") or []) if isinstance(e, dict)),
             {},
         )
-        reason = filter_entry.get("filter_reason") or "not_publicly_available"
-        detail = filter_entry.get("detail_msg") or filter_entry.get("notice") or "作品不存在或不可公开访问"
-        raise ContentExpiredError(f"抖音作品不可用（{reason}）：{detail}")
+        reason = filter_entry.get("filter_reason") or ""
+        detail = filter_entry.get("detail_msg") or filter_entry.get("notice") or ""
+        # 原始代号只进日志，不给用户看（用户看不懂 h265_video 这类内部字段值）。
+        logger.info("抖音未返回作品: reason=%s detail=%s", reason or "-", detail or "-")
+        raise ContentExpiredError(_douyin_filter_message(reason, detail))
 
     item = item_list[0]
     video = item.get("video") or {}
@@ -1132,9 +1187,7 @@ def _fetch_xhs_note_page(
         )
         if not _is_xhs_bounce_page(final_url):
             return resp, final_url
-    raise XhsAccessDeniedError(
-        "小红书平台暂时限制访问，请稍后重试；若持续失败请从 App 重新复制最新分享链接"
-    )
+    raise XhsAccessDeniedError(_XHS_LIMITED_MESSAGE)
 
 
 def _xhs_note_from_state(
@@ -1183,7 +1236,7 @@ def _extract_xhs_initial_state(
         r"window\.__INITIAL_STATE__=(.*?)</script>", html, flags=re.DOTALL
     )
     if not state_match:
-        raise PageStructureError("未找到小红书页面状态数据")
+        raise PageStructureError("平台页面已更新，暂时无法解析")
     state_blob = state_match.group(1)
     state_blob = re.sub(r":undefined([,}])", r":null\1", state_blob)
     state = json.loads(state_blob)
@@ -1194,8 +1247,8 @@ def _extract_xhs_initial_state(
         # 容器非空却取不到笔记，说明字段结构和预期不一致（上游改动）；
         # 容器为空，则是平台没给这条笔记（已删除 / 仅自己可见）。
         if structure_broken:
-            raise PageStructureError("小红书页面状态结构变化，未能取到笔记详情")
-        raise ContentExpiredError("未找到小红书笔记详情")
+            raise PageStructureError("平台页面已更新，暂时无法解析")
+        raise ContentExpiredError("该笔记已被删除或设为私密")
 
     note_id = note.get("noteId") or ""
     if not note_id:
@@ -1251,11 +1304,7 @@ def _extract_xhs_lightweight(
     resp.encoding = "utf-8"
 
     if "404" in urlparse(final_url).path:
-        raise MissingTokenError(
-            "小红书链接无效或缺少 xsec_token 参数。\n"
-            "请使用小红书 App「复制链接」功能获取分享链接（包含 xsec_token 参数），\n"
-            "格式如：/discovery/item/xxx?xsec_token=..."
-        )
+        raise MissingTokenError("链接无效或已失效")
 
     html = resp.text
 
@@ -1424,7 +1473,7 @@ def _extract_xhs_with_retries(url: str, telemetry: dict[str, int]) -> dict[str, 
                     _risk_events.clear()
                 return recovered
         raise last_error
-    raise UpstreamDataMissingError("小红书未返回可解析的作品信息")
+    raise UpstreamDataMissingError("平台未返回该作品的内容")
 
 
 # ---------------------------------------------------------------- 爱加速换 IP 兜底
@@ -1494,10 +1543,16 @@ def _current_proxy() -> str:
 
 
 def _is_risk_control_error(exc: BaseException) -> bool:
-    if isinstance(exc, XhsAccessDeniedError):
+    """异常是否属于平台风控（换出口 IP 可解）。
+
+    ⚠️ 2026-09-27：主判据改为**异常类型**。此前只看 `_RISK_CONTROL_MARKERS`
+    去匹配报错文案里的「平台暂时限制」「触发验证」—— 而那是**用户可见文案**，
+    措辞改一个字就会让抖音的换 IP 兜底静默失效。文案匹配只留作旧路径兜底。
+    （XhsAccessDeniedError / ShortLinkBlockedError 都是 PlatformLimitedError 子类。）
+    """
+    if isinstance(exc, PlatformLimitedError):
         return True
-    text = str(exc)
-    return any(marker in text for marker in _RISK_CONTROL_MARKERS)
+    return any(marker in str(exc) for marker in _RISK_CONTROL_MARKERS)
 
 
 def _pool_config() -> dict[str, Any]:
@@ -1848,7 +1903,7 @@ def extract_link(raw: str) -> ExtractResult:
         return ExtractResult(
             success=False,
             error=str(e),
-            hint="请粘贴抖音或小红书的分享链接（App 内复制链接）",
+            hint="请粘贴抖音或小红书的分享链接",
             error_kind=getattr(e, "kind", "invalid_input"),
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -1858,19 +1913,21 @@ def extract_link(raw: str) -> ExtractResult:
         return ExtractResult(
             success=False,
             error="不支持的链接，仅支持抖音和小红书链接",
-            hint="请粘贴抖音或小红书的分享链接（App 内复制链接）",
+            hint="请粘贴抖音或小红书的分享链接",
             error_kind="unsupported_domain",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
 
     # 2.5 残缺链接预检：作品 ID 明显短于标准长度时（聊天工具截断），直接拦截，
-    # 不产生平台请求，也避免同链接反复重试（失败负缓存会兜底 10 分钟）
+    # 不产生平台请求。
+    # ⚠️ 原注释写「失败负缓存会兜底 10 分钟」——**该机制并不存在**（cache_put 只在
+    # 成功路径被调用），重试会实打实再打一遍平台。改注释为真，别误导排查（2026-09-27）。
     integrity_error = _validate_url_integrity(url)
     if integrity_error:
         return ExtractResult(
             success=False,
             error=integrity_error,
-            hint="请从 App 内复制完整分享链接（注意复制完整，避免被聊天工具截断）",
+            hint="请重新从 App 复制完整链接",
             error_kind="url_truncated",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -1882,7 +1939,7 @@ def extract_link(raw: str) -> ExtractResult:
         return ExtractResult(
             success=False,
             error=malformed_short_link,
-            hint="请从 App 内复制完整分享链接，不要手工拼接参数",
+            hint="请从 App 内直接复制链接，不要手工拼接",
             error_kind="malformed_url",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -1960,7 +2017,7 @@ def extract_link(raw: str) -> ExtractResult:
         # 只有拿到稳定作品 ID 时，才允许降级为“已转换、文案待补”。
         # 若连作品 ID 都没有，通常是失效短链、登录页或平台错误页，不能误报成功。
         if missing_caption and not post_id:
-            raise UpstreamDataMissingError("平台未返回可识别的作品信息，请确认链接未失效或重新从 App 复制")
+            raise UpstreamDataMissingError("平台未返回该作品的信息")
 
         result = ExtractResult(
             success=True,
@@ -2007,8 +2064,8 @@ def extract_link(raw: str) -> ExtractResult:
             logger.info("性能分解 [failed] %s", " ".join(f"{k}={v}ms" for k, v in telemetry.items() if k.endswith("_ms")))
             return ExtractResult(
                 success=False,
-                error=f"提取失败: {str(e)}",
-                hint="请检查链接是否正确、作品是否公开可见、小红书链接是否带 xsec_token",
+                error=str(e),
+                hint=_error_hint_for(kind),
                 error_kind=kind,
                 telemetry=telemetry,
             )
@@ -2017,8 +2074,8 @@ def extract_link(raw: str) -> ExtractResult:
         telemetry["total_ms"] = round((time.perf_counter() - started) * 1000)
         return ExtractResult(
             success=False,
-            error="提取失败，请稍后重试",
-            hint="请检查链接是否正确、作品是否公开可见",
+            error="提取失败",
+            hint=_error_hint_for(kind),
             error_kind=kind,
             telemetry=telemetry,
         )
