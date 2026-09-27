@@ -394,6 +394,18 @@ DOUYIN_GATE = _PlatformGate(
     min_interval=_float_env("DOUYIN_GATE_INTERVAL", 0.8),
 )
 
+# 短链解析闸门（xhslink.cn / v.douyin.com）。2026-09-27 新增。
+# 此前短链阶段**完全不受任何闸门保护**：笔记页有 Semaphore(1) + 1s 间隔，
+# 短链却能被多个 worker 线程同时打出去 —— 月底高峰期的瞬时并发突发源。
+# 只限并发、**不加额外间隔**（min_interval=0）：真实用户点短链时浏览器会立刻
+# 跟随 302 打第二跳，短链与笔记页贴在一起才像真人；被风控盯上的是「多用户
+# 瞬时并发」，不是「同一用户的两次跳转」。故此处只削峰、不拖慢单条。
+SHORTLINK_GATE = _PlatformGate(
+    "shortlink",
+    max_concurrency=int(os.environ.get("SHORTLINK_GATE_CONCURRENCY", "2")),
+    min_interval=_float_env("SHORTLINK_GATE_INTERVAL", 0.0),
+)
+
 # 每个 Gunicorn worker 内串行化小红书页面请求，并保留很短的自然间隔。
 # 批量任务此前只有通用抖动，多个线程仍可能同时打到小红书而触发临时验证页。
 _xhs_request_slot = threading.BoundedSemaphore(1)
@@ -601,25 +613,36 @@ def _request_short_link(url: str, headers: dict) -> tuple[str, str]:
     - unresolved 有响应但没跳转（短链页直接返回 200），无法判定，交下游
     - error      请求本身失败（网络/DNS/超时），交下游
     """
+    # 走短链闸门（只限并发、不加间隔）：防止多线程同时向外打短链请求。
+    # 详见 SHORTLINK_GATE 定义处的说明。
+    SHORTLINK_GATE.acquire()
     try:
-        resp = _safe_get_with_redirects(url, timeout=10, headers=headers)
-    except Exception as e:  # noqa: BLE001 - 解析失败不阻断主链路
-        logger.warning("短链接解析失败: %s", e)
-        return "error", ""
-    resolved = (resp.url or "").strip()
-    if not resolved or resolved == url:
-        return "unresolved", ""
-    if _is_xhs_bounce_page(resolved):
-        return "blocked", ""
-    return "ok", resolved
+        try:
+            resp = _safe_get_with_redirects(url, timeout=10, headers=headers)
+        except Exception as e:  # noqa: BLE001 - 解析失败不阻断主链路
+            logger.warning("短链接解析失败: %s", e)
+            return "error", ""
+        resolved = (resp.url or "").strip()
+        if not resolved or resolved == url:
+            return "unresolved", ""
+        if _is_xhs_bounce_page(resolved):
+            return "blocked", ""
+        return "ok", resolved
+    finally:
+        SHORTLINK_GATE.release()
 
 
 def _resolve_short_link(url: str) -> str:
     """解析短链接：xhslink.cn / v.douyin.com → 最终 URL
 
     必须发送完整请求头：只带 User-Agent 会被 xhslink.cn 判为机器人并 302 到
-    /login（详见 XHS_SHARE_HEADERS 注释）。小红书先用完整桌面头，若仍被打回
-    /login 再换移动端分享头重试一次；抖音按其移动端头发送。
+    /login（详见 XHS_SHARE_HEADERS 注释）。小红书**先用移动端分享头**，若仍被
+    打回 /login 再换桌面头重试一次；抖音按其移动端头发送。
+
+    2026-09-27 调换顺序（原为桌面头优先）：实测同一批短链交替请求，桌面头
+    6/6 被打回 /login、分享头 6/6 解析成功。桌面头既然必然失败，先打它就等于
+    每次请求都白送一个「被平台拒绝」的负样本给风控，还多花约 300ms。
+    现在与笔记页链路（_fetch_xhs_note_page）统一为「分享头优先」。
 
     被明确打回 /login 时**不再静默返回原 URL**（2026-09-13 修）：
     这里才是失败最集中的地方 —— 当天 35 次失败全部落在 xhslink 短链上，
@@ -629,7 +652,7 @@ def _resolve_short_link(url: str) -> str:
     既避免再拿一个已知被限流的地址去打 3 次笔记页请求，也让告警口径正确。
     """
     if "xhslink" in url:
-        candidates = (XHS_HEADERS, XHS_SHARE_HEADERS)
+        candidates = (XHS_SHARE_HEADERS, XHS_HEADERS)
         platform = "xiaohongshu"
     elif "douyin" in url:
         candidates = (DOUYIN_MOBILE_HEADERS,)
@@ -1280,7 +1303,8 @@ def _extract_xhs_lightweight(
 
     author_name = _mg(r'<meta[^>]*?\bname=["\']author["\'][^>]*?content=["\']([^"\']+)["\']')
     if not author_name:
-        author_name = _mg(r'"nickname"\s*:\s*"([^"]+)"')
+        # 新版页面作者字段是 user.nickName（大写 N），旧版是 nickname，两者都认。
+        author_name = _mg(r'"(?:nickname|nickName)"\s*:\s*"([^"]+)"')
     if not author_name:
         parts = page_title.split(" - ") if " - " in page_title else page_title.split(" | ")
         if len(parts) >= 2 and len(parts[-1]) < 20:
