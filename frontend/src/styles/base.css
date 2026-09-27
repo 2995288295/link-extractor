@@ -1,0 +1,37 @@
+/* ============================================================================
+ * base · 重置、排版底色、无障碍
+ * 只放「全局一次性」的规则；任何带类名的组件一律去 components.css。
+ * ========================================================================== */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  /* 2.0：去掉 linear-gradient(180deg,#edf3fb 0,var(--bg) 280px)
+     —— 浅色下渐变会让页面上半部分发灰显脏，纯 --bg 更干净（方案 §4.3） */
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.6;
+}
+
+/* 焦点环：2.0 改深色。原来的 rgba(23,105,224,.32) 是蓝色，
+   品牌色换成黄之后蓝色焦点环成了体系外的孤色，且黄色焦点环不可用（对比度太低）。 */
+.btn:focus-visible,
+.tab:focus-visible,
+.cover-button:focus-visible,
+.caption-toggle:focus-visible,
+.preview-close:focus-visible {
+  outline: 3px solid rgba(20, 24, 31, .28);
+  outline-offset: 2px;
+}
+
+.hidden { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}

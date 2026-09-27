@@ -1,0 +1,296 @@
+/* ============================================================================
+ * components · 组件层
+ * 规则顺序刻意与改造前的单文件保持一致 —— 层叠结果不变，只是取值换成了令牌。
+ * ========================================================================== */
+
+/* ── 卡片 ─────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 20px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-2);
+}
+.card h2, .input-label { display: block; font-size: var(--fs-lg); font-weight: 650; margin-bottom: 12px; }
+
+/* ── 输入 ─────────────────────────────────────────────────── */
+textarea {
+  width: 100%;
+  min-height: 120px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 12px;
+  font-size: var(--fs-md);
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+  transition: border-color .15s;
+}
+/* 聚焦态：原来用品牌蓝，品牌色换黄后蓝色成了体系外的孤色；改中性深色底纹 */
+textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 31, .10); }
+
+/* ── 按钮 ─────────────────────────────────────────────────── */
+.toolbar { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.btn {
+  border: none;
+  border-radius: var(--r-sm);
+  padding: 10px 18px;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background .15s, opacity .15s, transform .15s;
+}
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+/* 主按钮：黄底黑字（14.8:1）。--brand-ink 是专用黑，不要用 --ink 之外的颜色 */
+.btn-primary { background: var(--brand); color: var(--brand-ink); font-weight: 600; }
+.btn-primary:hover:not(:disabled) { background: var(--brand-hover); }
+.btn-ghost { background: var(--surface-2); color: var(--ink); }
+.btn-ghost:hover { background: var(--surface-3); }
+.btn-danger { background: var(--fail-soft); color: var(--fail-ink); }
+.btn-danger:hover { background: var(--fail-soft-hover); }
+.btn-danger.confirming { background: var(--fail); color: #fff; }
+.btn-sm { padding: 6px 12px; font-size: var(--fs-sm); border-radius: var(--r-sm); }
+
+/* ── 状态行 ───────────────────────────────────────────────── */
+.status { margin-top: 12px; font-size: var(--fs-sm); color: var(--ink-2); }
+.status.error { color: var(--fail-ink); }
+.link-count {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+  min-height: 20px;
+}
+/* 强调文字统一走 --ink（黄不能当文字色，方案 §4.2） */
+.link-count .count {
+  font-weight: 700;
+  color: var(--ink);
+}
+.link-count .count.zero { color: var(--ink-2); }
+
+/* ── 结果条目 ─────────────────────────────────────────────── */
+.result-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px;
+  margin-bottom: 12px;
+  animation: fadeIn .25s ease;
+  /* 列表条目比 .card 轻一档：满屏结果时 20px 大模糊阴影会糊成一片 */
+  box-shadow: var(--shadow-1);
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.result-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.platform-tag {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: var(--r-full);
+}
+/* 平台识别色与品牌体系无关，保留原样（方案 §4.3） */
+.platform-douyin { background: #1a1a1a; color: #fff; }
+.platform-xiaohongshu { background: #fff0f5; color: #d63384; }
+.result-index { font-size: var(--fs-sm); color: var(--ink-2); }
+.result-badge { font-size: var(--fs-xs); padding: 2px 10px; border-radius: var(--r-full); font-weight: 600; }
+.badge-ok { background: var(--ok-soft); color: var(--ok-ink); }
+.badge-fail { background: var(--fail-soft); color: var(--fail-ink); }
+
+.result-main { display: flex; gap: 16px; }
+.cover-wrap { flex-shrink: 0; }
+.cover-button {
+  position: relative; display: block; width: 76px; height: 100px; padding: 0;
+  overflow: hidden; border: 1px solid var(--border); border-radius: var(--r-sm);
+  background: var(--surface-2); cursor: zoom-in;
+}
+.cover-button:disabled { cursor: default; }
+.cover-placeholder {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: #fff; font-size: 18px; font-weight: 700;
+  /* 通用占位配色从品牌蓝渐变改为中性石墨：品牌蓝已从体系里退场 */
+  background: linear-gradient(155deg, #3D4A5A, #1B232E);
+}
+.cover-button.cover-xhs .cover-placeholder { background: linear-gradient(155deg, #e44e70, #a7193a); }
+.cover-button.image-failed .cover-hint { display: none; }
+.cover-hint {
+  position: absolute; right: 5px; bottom: 5px; z-index: 2; padding: 1px 5px;
+  border-radius: 4px; background: rgba(20, 24, 31, .74); color: #fff; font-size: 10px;
+}
+.cover {
+  position: relative; z-index: 1; width: 100%; height: 100%;
+  object-fit: cover;
+  background: var(--surface-2);
+}
+.result-content { flex: 1; min-width: 0; }
+
+/* ── 字段 ─────────────────────────────────────────────────── */
+.field { margin-bottom: 8px; }
+.field-label { font-size: var(--fs-xs); color: var(--ink-2); margin-bottom: 2px; }
+.field-value {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font-size: var(--fs-sm);
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+/* 链接不再用蓝色：--ink + 下划线（方案 §4.2「链接色不能用黄」的落地方式） */
+.field-value.link {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: keep-all;
+}
+.field-value.caption {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.field-value.caption.expanded { -webkit-line-clamp: unset; }
+.caption-wrap { position: relative; }
+.caption-toggle {
+  display: none;
+  margin-top: 6px;
+  padding: 2px 12px;
+  font-size: var(--fs-xs);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.caption-toggle:hover { background: var(--surface-2); }
+.caption-wrap.show-toggle .caption-toggle { display: block; margin-left: auto; }
+.field-value.empty { color: var(--ink-2); font-style: italic; }
+
+/* ── 复制行 ───────────────────────────────────────────────── */
+.copy-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.copy-row .btn { flex: 1; min-width: 120px; white-space: nowrap; }
+.btn-copy { background: var(--brand); color: var(--brand-ink); font-weight: 600; }
+.btn-copy:hover:not(:disabled) { background: var(--brand-hover); }
+.btn-copy[data-kind="caption"] { background: var(--brand-soft); color: var(--brand-ink); }
+.btn-copy[data-kind="caption"]:hover:not(:disabled) { background: var(--brand-soft-hover); }
+/* 复制成功的绿：白字压 --ok(#12A06A) 只有 3.49:1，改用 --ok-strong(5.36:1) */
+.btn-copy.copied { background: var(--ok-strong); color: #fff; }
+.result-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+/* ── 历史记录 ─────────────────────────────────────────────── */
+.history-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.history-item:last-child { border-bottom: none; }
+.history-link { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.history-card-body { display: flex; gap: 12px; margin-top: 8px; }
+.history-card-content { flex: 1; min-width: 0; }
+.history-card-body .cover-button { width: 56px; height: 74px; }
+
+/* ── Tab ──────────────────────────────────────────────────── */
+.tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tab {
+  padding: 8px 16px;
+  font-size: var(--fs-md);
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: var(--ink-2);
+  /* ★ 3px 而非 2px：整条 tab 的描边宽度固定，选中时只换颜色，
+     避免切换 tab 时下划线从 2px 变 3px 引起 1px 高度跳变 */
+  border-bottom: 3px solid transparent;
+  font-weight: 500;
+}
+/* 选中态：文字用 --ink，黄色只出现在 3px 实心下划线上（方案 §4.2） */
+.tab.active { color: var(--ink); border-bottom-color: var(--brand); font-weight: 600; }
+
+/* ── 统计 ─────────────────────────────────────────────────── */
+.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 16px;
+  text-align: center;
+}
+.stat-card .num { font-size: var(--fs-2xl); font-weight: 600; color: var(--ink); line-height: 1.2; }
+.stat-card .label { font-size: var(--fs-xs); color: var(--ink-2); margin-top: 4px; }
+.stat-card .sub { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
+.stat-card.ok .num { color: var(--ok); }
+.stat-card.fail .num { color: var(--fail); }
+
+.trend-line { width: 100%; height: 160px; display: block; margin-top: 8px; }
+.trend-line .grid-line { stroke: var(--border); stroke-width: 0.5; }
+.trend-line .axis-label { font-size: 11px; fill: var(--ink-2); }
+/* 折线主色走 --accent（数据色），不是品牌黄 —— 黄色当线色在浅底上几乎看不见 */
+.trend-line .dot {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+.trend-line .dot:hover { fill: var(--accent-hover); }
+.trend-line .value-label { font-size: 11px; fill: var(--ink-2); }
+
+.platform-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.platform-chip {
+  font-size: var(--fs-xs);
+  padding: 4px 12px;
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ── 使用提示 ─────────────────────────────────────────────── */
+.disclaimer {
+  margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--warn-border);
+  border-radius: var(--r-sm); background: var(--warn-soft); color: var(--warn-ink); font-size: var(--fs-xs);
+  line-height: 1.65; text-align: left;
+}
+.disclaimer strong { color: var(--warn-ink); font-weight: 700; }
+
+/* ── 加载与提示 ───────────────────────────────────────────── */
+/* ★ 修正既有缺陷：原来是 rgba(255,255,255,.4)/#fff 的白色 spinner，
+   在白底按钮（btn-ghost）上一直不可见；换成 currentColor 后，
+   黄底黑字按钮上跟着文字色走，任何按钮上都可见。 */
+.loading-spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid rgba(20, 24, 31, .22);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.toast {
+  position: fixed;
+  top: 20px; left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--surface);
+  padding: 10px 20px;
+  border-radius: var(--r-lg);
+  font-size: var(--fs-md);
+  z-index: 999;
+  opacity: 0;
+  transition: opacity .2s;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; }
+
+/* ── 封面大图 ─────────────────────────────────────────────── */
+.cover-preview {
+  position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center;
+  padding: 24px; background: rgba(10, 13, 18, .78); backdrop-filter: blur(4px);
+}
+.preview-dialog { position: relative; width: min(100%, 480px); max-height: 100%; }
+.preview-image { display: block; width: 100%; max-height: calc(100vh - 96px); object-fit: contain; border-radius: var(--r-md); background: #0B1118; }
+.preview-close {
+  position: absolute; top: 10px; right: 10px; width: 40px; height: 40px; border: 0;
+  border-radius: 50%; background: rgba(10, 13, 18, .80); color: #fff; font-size: 22px; cursor: pointer;
+}

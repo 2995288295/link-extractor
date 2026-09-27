@@ -1,0 +1,69 @@
+/* ============================================================================
+ * pages/index · 用户页骨架（容器、页头、页脚、响应式）
+ * 拆出来是为了 P4 后台面板能复用 tokens/components 而不继承用户页布局。
+ * ========================================================================== */
+
+.container { max-width: 960px; margin: 0 auto; padding: 24px 16px 96px; }
+
+/* ── 页头 ─────────────────────────────────────────────────── */
+header { text-align: center; padding: 32px 0 24px; }
+/* 品牌标识：黄色做成实心胶囊块而不是黄色文字
+   —— 黄字在 --bg 上对比度约 1.05:1，等于看不见（方案 §4.2）。
+   色块高度 ≈22px，满足「黄色只出现在 ≥8px 实心块」的约束。 */
+.eyebrow {
+  display: inline-block;
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-size: 10px;
+  line-height: 1.4;
+  font-weight: 700;
+  letter-spacing: .14em;
+  padding: 4px 10px;
+  border-radius: var(--r-full);
+}
+header h1 { font-size: var(--fs-2xl); font-weight: 750; letter-spacing: -.04em; margin-top: 8px; }
+header p { color: var(--ink-2); font-size: var(--fs-md); margin: 8px auto 0; max-width: 560px; }
+
+/* ── 页脚 ─────────────────────────────────────────────────── */
+footer { text-align: center; color: var(--ink-2); font-size: var(--fs-xs); margin-top: 32px; }
+.footer-note { margin-bottom: 4px; }
+/* --ink-3 仅此一处：11px 非关键署名。原 #9aa0a8 在 --bg 上约 2.8:1，
+   换成 --ink-3 提到约 3.3:1；再深就会跟 .footer-note 糊成一块。 */
+.footer-author { color: var(--ink-3); font-size: 11px; }
+
+/* ── 响应式 ───────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  .container { padding: 16px 12px 72px; }
+  header { padding: 20px 0 16px; }
+  header h1 { font-size: 24px; }
+  header p { font-size: var(--fs-sm); }
+  .card { padding: 14px; }
+  textarea { min-height: 96px; font-size: var(--fs-md); }
+  .toolbar { gap: 8px; }
+  .toolbar .btn { flex: 1; padding: 12px 10px; font-size: var(--fs-md); }
+  /* 触控区 ≥44px（手机标准） */
+  .btn { min-height: 44px; }
+  .copy-row .btn { min-height: 44px; font-size: var(--fs-md); }
+  /* 封面缩小 */
+  .cover-button { width: 64px; height: 84px; }
+  /* 统计卡片窄屏单列 */
+  .stats-grid { grid-template-columns: 1fr; gap: 12px; }
+  .stat-card .num { font-size: 24px; }
+  /* 趋势图在小屏高度自适应 */
+  .trend-line { height: 140px; }
+  /* tab 栏触控加大 */
+  .tab { padding: 10px 14px; font-size: var(--fs-md); }
+  .caption-toggle { min-width: 44px; min-height: 44px; }
+  /* 结果卡片间距收紧 */
+  .result-item { padding: 12px; }
+  .field-value { font-size: var(--fs-sm); }
+  /* toast 顶部避开刘海 */
+  .toast { top: calc(12px + env(safe-area-inset-top)); }
+  .footer-author { font-size: 10px; }
+  .cover-preview { padding: 16px; }
+}
+
+/* 说明：原来还有一条 @media (min-width: 901px){ .container{max-width:960px} }。
+   现在 .container 直接就是 960px，那条 media 已在数学上成为恒真分支（≤992px 视口
+   可用宽度本就小于 960），故合并删除，行为在 901–992px 区间是「变宽到约 960」。
+   方案 §7.2 要求「容器统一 960px」。 */
