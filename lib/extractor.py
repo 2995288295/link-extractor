@@ -691,6 +691,38 @@ def _request_short_link(url: str, headers: dict) -> tuple[str, str]:
         SHORTLINK_GATE.release()
 
 
+# ------------------------------------------------- 短链解析结果缓存（v1.12.1）
+
+_SHORTLINK_CACHE_TTL = float(os.environ.get("SHORTLINK_CACHE_TTL_SECONDS", "1800"))
+_shortlink_cache: dict = {}  # url -> [resolved_url, ts]
+_shortlink_cache_lock = threading.Lock()
+
+
+def _shortlink_resolved_cached(url: str) -> str:
+    """短链 → 笔记页 URL 的 30min 结果缓存；命中省掉 302 那一跳（约 300ms+）。
+
+    只缓存「解析出了不同地址」的结果：失败抛异常 / 返回原 URL 都不写缓存，
+    失败重试语义由死链缓存与兜底链路各管各的。xsec_token 就在解析出的
+    URL 上，30min 内有效。进程内记忆，重启即清（代价=重新解析一次）。
+    """
+    now = time.monotonic()
+    with _shortlink_cache_lock:
+        entry = _shortlink_cache.get(url)
+        if entry:
+            if now - entry[1] <= _SHORTLINK_CACHE_TTL:
+                logger.info("短链解析缓存命中: %s", url[:60])
+                return entry[0]
+            del _shortlink_cache[url]
+    resolved = _resolve_short_link(url)
+    if resolved != url:
+        with _shortlink_cache_lock:
+            if len(_shortlink_cache) > 500:  # 防膨胀：删最老一条
+                oldest = min(_shortlink_cache, key=lambda k: _shortlink_cache[k][1])
+                del _shortlink_cache[oldest]
+            _shortlink_cache[url] = [resolved, now]
+    return resolved
+
+
 def _resolve_short_link(url: str) -> str:
     """解析短链接：xhslink.cn / v.douyin.com → 最终 URL
 
@@ -2097,7 +2129,7 @@ def extract_link(raw: str) -> ExtractResult:
         if is_xhs:
             # 小红书：先解析短链判断 token 情况（小红书短链较多）
             resolve_started = time.perf_counter()
-            resolved = _resolve_short_link(url)
+            resolved = _shortlink_resolved_cached(url)
             telemetry["redirect_ms"] = round((time.perf_counter() - resolve_started) * 1000)
             data = _extract_xhs_with_retries(resolved, telemetry)
         else:
