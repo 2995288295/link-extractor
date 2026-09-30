@@ -76,6 +76,12 @@ class MalformedShortLinkError(InvalidInputError):
     kind = "malformed_url"
 
 
+class SphLinkInvalidError(InvalidInputError):
+    """视频号链接短码无法识别（多为「转发文字」里不含链接）。"""
+
+    kind = "sph_link_invalid"
+
+
 class ContentExpiredError(ExtractError):
     """平台明确表示作品不存在 / 已删除 / 不可公开访问。"""
 
@@ -142,8 +148,9 @@ _ERROR_HINT_BY_KIND = {
     "url_truncated": "请重新复制完整链接",
     "missing_xsec_token": "请重新复制分享链接",
     "malformed_url": "请重新复制分享链接",
-    "unsupported_domain": "请粘贴抖音或小红书的分享链接",
-    "invalid_input": "请粘贴抖音或小红书的分享链接",
+    "sph_link_invalid": "请在微信里点「分享→复制链接」后重试",
+    "unsupported_domain": "请粘贴抖音、小红书或视频号的分享链接",
+    "invalid_input": "请粘贴抖音、小红书或视频号的分享链接",
     "redirect_blocked": "请重新复制分享链接",
 }
 _DEFAULT_ERROR_HINT = "请稍后重试"
@@ -183,6 +190,7 @@ ERROR_KIND_TO_OUTCOME = {
     "url_truncated": "invalid_input",
     "missing_xsec_token": "invalid_input",
     "malformed_url": "invalid_input",
+    "sph_link_invalid": "invalid_input",
     # 内容不可用
     "expired_content": "expired_content",
     "note_missing": "expired_content",
@@ -305,6 +313,11 @@ def _extract_post_id_from_url(url: str) -> str:
     if "xiaohongshu" in url or "xhslink" in url:
         m = re.search(r"/(?:explore|discovery/item)/([0-9A-Za-z]+)", path)
         return m.group(1) if m else ""
+    if "weixin.qq.com" in url:
+        m = re.search(r"weixin\.qq\.com/sph/([0-9A-Za-z]+)", url, re.I) or re.search(
+            r"finder-preview/pages/sph\?[^#]*?\bid=([0-9A-Za-z]+)", url, re.I
+        )
+        return m.group(1) if m else ""
     return ""
 
 
@@ -362,6 +375,8 @@ ALLOWED_DOMAINS = {
     "www.iesdouyin.com", "iesdouyin.com",
     "www.xiaohongshu.com", "xiaohongshu.com",
     "xhslink.com", "xhslink.cn",
+    # 视频号分享短链（v1.13.0）；channels.weixin.qq.com 以点后缀命中
+    "weixin.qq.com",
 }
 
 DEFAULT_UA = (
@@ -909,6 +924,8 @@ def _canonicalize_media_url(platform: str, url: str, post_id: str = "") -> str:
         if parsed_src.query:
             canonical += f"?{parsed_src.query}"
         return canonical
+    if platform == "sph" and work_id:
+        return f"https://weixin.qq.com/sph/{work_id}"
     try:
         return urlparse._replace(urlparse(source_url), query="", fragment="").geturl()
     except Exception:
@@ -1994,6 +2011,131 @@ def _xhs_via_failover(url: str, telemetry: dict[str, int]) -> Optional[dict[str,
 
 # ---------------------------------------------------------------- 汇总
 
+# ---------------------------------------------------------------- 视频号提取（v1.13.0）
+# 实测（2026-10-01，9 条真实分享链接）：
+# - 短链 weixin.qq.com/sph/{id} 301 → channels.weixin.qq.com/finder-preview/pages/sph?id={id}
+# - 数据接口 POST /finder-preview/api/feed/get_feed_info 无 cookie/签名/登录态，
+#   但 TLS/HTTP2 指纹校验会拒绝非浏览器客户端（requests/curl → permission
+#   verification failed）；curl_cffi impersonate="chrome" 后 9/9 通过。
+# - 成功响应是 HTTP 201（不是 200）。无独立 title 字段（取文案首行）。
+# 依赖：curl_cffi（requirements.txt 已登记）。接口为公开分享预览页所用，
+# 量级按平台闸门限流（SPH_GATE_* 可调）。
+_SPH_API_URL = "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info"
+_SPH_PAGE_URL = "https://channels.weixin.qq.com/finder-preview/pages/sph"
+
+PLATFORM_LABELS = {"douyin": "抖音", "xiaohongshu": "小红书", "sph": "视频号"}
+
+_SPH_GATE = _PlatformGate(
+    "sph",
+    max_concurrency=int(os.environ.get("SPH_GATE_CONCURRENCY", "2")),
+    min_interval=_float_env("SPH_GATE_INTERVAL", 0.2),
+)
+
+
+def _sph_short_id(url: str) -> str:
+    """提取视频号短码：weixin.qq.com/sph/{id} 或 finder-preview 页 ?id={id}。"""
+    m = re.search(r"weixin\.qq\.com/sph/([0-9A-Za-z]+)", url, re.I)
+    if not m:
+        m = re.search(r"finder-preview/pages/sph\?[^#]*?\bid=([0-9A-Za-z]+)", url, re.I)
+    return m.group(1) if m else ""
+
+
+def _parse_sph_count(value) -> int:
+    """视频号计数是格式化字符串：'32' / '1.2万' → int；失败返回 0。"""
+    text = str(value or "").strip().replace(",", "")
+    if not text:
+        return 0
+    m = re.fullmatch(r"([\d.]+)\s*万", text)
+    if m:
+        try:
+            return int(float(m.group(1)) * 10000)
+        except ValueError:
+            return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
+
+
+def _sph_title_from_caption(caption: str) -> str:
+    """视频号无独立标题：取第一个话题标签前的正文首行（保留标点）。"""
+    for line in str(caption or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        head = re.split(r"#", line, maxsplit=1)[0].strip(" ，,、")
+        return head or line[:30]
+    return ""
+
+
+def _extract_sph(url: str, telemetry: dict[str, int]) -> dict[str, Any]:
+    """视频号分享链接提取：短码 → finder-preview 公开接口 → 字段映射。
+
+    归因遵守既有体系：短码识别不了 = 用户输入（sph_link_invalid）；
+    接口异常/结构变化 = upstream 系；不透传原始报错（§I6 纪律）。
+    """
+    short_id = _sph_short_id(url)
+    if not short_id or len(short_id) < 6:
+        raise SphLinkInvalidError("无法识别该视频号链接")
+
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError as exc:  # pragma: no cover - 部署环境已随 venv 安装
+        raise UpstreamError("该视频号作品暂时无法获取") from exc
+
+    _SPH_GATE.acquire()
+    api_started = time.perf_counter()
+    try:
+        try:
+            resp = curl_requests.post(
+                f"{_SPH_API_URL}?_rid={os.urandom(8).hex()}&_pageUrl={_SPH_PAGE_URL}",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                    "Origin": "https://channels.weixin.qq.com",
+                    "Referer": f"{_SPH_PAGE_URL}?id={short_id}",
+                },
+                json={"baseReq": {"generalToken": ""}, "shortUri": short_id},
+                impersonate="chrome",
+                timeout=10,
+            )
+        except Exception as exc:
+            logger.warning("视频号接口请求失败: %s", exc)
+            raise UpstreamError("该视频号作品暂时无法获取") from exc
+    finally:
+        _SPH_GATE.release()
+    telemetry["sph_api_ms"] = round((time.perf_counter() - api_started) * 1000)
+
+    if resp.status_code not in (200, 201):
+        logger.warning("视频号接口 HTTP %s: %s", resp.status_code, str(resp.text)[:200])
+        raise UpstreamError("该视频号作品暂时无法获取")
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise PageStructureError("该视频号作品暂时无法获取") from exc
+    if payload.get("errCode") != 0 or not isinstance(payload.get("data"), dict):
+        logger.warning("视频号接口返回异常: %s", str(payload)[:200])
+        raise UpstreamError("该视频号作品暂时无法获取")
+
+    data = payload["data"]
+    feed = data.get("feedInfo") or {}
+    author = data.get("authorInfo") or {}
+    caption = str(feed.get("description") or "").strip()
+    return {
+        "platform": "sph",
+        "title": _sph_title_from_caption(caption),
+        "caption": caption,
+        "author_name": str(author.get("nickname") or "").strip(),
+        "publish_time": _fmt_ts(feed.get("createtime")),
+        "like_count": _parse_sph_count(feed.get("likeCountFmt")),
+        "video_url": "",
+        "canonical_url": f"https://weixin.qq.com/sph/{short_id}",
+        "cover_url": str(feed.get("coverUrl") or ""),
+        "post_id": short_id,
+        "partial": not caption,
+    }
+
+
 def _fmt_ts(ts) -> str:
     """时间戳 → 'YYYY-MM-DD HH:MM:SS'，支持秒/毫秒/ISO 字符串。"""
     if not ts:
@@ -2036,7 +2178,7 @@ def extract_link(raw: str) -> ExtractResult:
         return ExtractResult(
             success=False,
             error=str(e),
-            hint="请粘贴抖音或小红书的分享链接",
+            hint="请粘贴抖音、小红书或视频号的分享链接",
             error_kind=getattr(e, "kind", "invalid_input"),
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -2045,8 +2187,8 @@ def extract_link(raw: str) -> ExtractResult:
     if not _is_safe_url(url):
         return ExtractResult(
             success=False,
-            error="仅支持抖音和小红书链接",
-            hint="请粘贴抖音或小红书的分享链接",
+            error="仅支持抖音、小红书或视频号链接",
+            hint="请粘贴抖音、小红书或视频号的分享链接",
             error_kind="unsupported_domain",
             telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
         )
@@ -2081,6 +2223,7 @@ def extract_link(raw: str) -> ExtractResult:
         # 提速优化：抖音提取内部已处理短链重定向，不先做 _resolve_short_link
         # 避免短链被解析成 douyin.com/video/xxx 后再被 _extract_douyin 重复请求一次
         is_xhs = "xiaohongshu" in url or "xhslink" in url
+        is_sph = "weixin.qq.com" in url.lower()
         # 死链秒回：24h 内跨 30min 连败 >=5 次的链接不再打平台（误差代价=用户
         # 从 App 重新复制即可绕过；收益=止损 33 连败这类炮灰请求）。
         if is_xhs and _is_dead_link(url):
@@ -2100,7 +2243,7 @@ def extract_link(raw: str) -> ExtractResult:
         # 公开作品 ID 的完整提取结果可跨分享形式复用，降低平台偶发验证导致的重复失败。
         # 小红书共享缓存不保存分享参数，命中时再用本次输入链接生成规范链接。
         if post_id:
-            cache_keys.append(_public_work_cache_key("xiaohongshu" if is_xhs else "douyin", post_id))
+            cache_keys.append(_public_work_cache_key("xiaohongshu" if is_xhs else ("sph" if is_sph else "douyin"), post_id))
         cache_started = time.perf_counter()
         cached = None
         for candidate_key in cache_keys:
@@ -2132,6 +2275,11 @@ def extract_link(raw: str) -> ExtractResult:
             resolved = _shortlink_resolved_cached(url)
             telemetry["redirect_ms"] = round((time.perf_counter() - resolve_started) * 1000)
             data = _extract_xhs_with_retries(resolved, telemetry)
+        elif is_sph:
+            # 视频号：短码直调 finder-preview 公开接口（无短链解析一跳）
+            external_started = time.perf_counter()
+            data = _extract_sph(url, telemetry)
+            telemetry["platform_total_ms"] = round((time.perf_counter() - external_started) * 1000)
         else:
             external_started = time.perf_counter()
             try:
@@ -2166,7 +2314,7 @@ def extract_link(raw: str) -> ExtractResult:
         result = ExtractResult(
             success=True,
             error_kind="success",
-            platform="抖音" if platform == "douyin" else "小红书",
+            platform=PLATFORM_LABELS.get(platform, platform),
             platform_raw=platform,
             title=data.get("title", ""),
             caption=_clean_caption(data.get("caption", "")),

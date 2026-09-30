@@ -40,6 +40,8 @@ _ALLOWED_IMAGE_HOSTS = (
     "douyinpic.com", "douyinimg.com", "douyinvod.com",
     "xhscdn.com", "xiaohongshu.com",
     "xhslink.com",
+    # 视频号封面 CDN（v1.13.0）；finder.video.qq.com 仅提供带 token 的图片/视频对象
+    "finder.video.qq.com",
 )
 
 

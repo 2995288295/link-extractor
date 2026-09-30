@@ -4,6 +4,37 @@
 
 ## [未发布]
 
+### 新增（v1.13.0 · 2026-10-01）· 视频号（微信 Channels）兼容
+
+- **新平台「视频号」上线**：识别 `weixin.qq.com/sph/{id}` 分享短链（及
+  `finder-preview/pages/sph?id=` 形态），直调 finder-preview 公开接口
+  `POST /finder-preview/api/feed/get_feed_info`，返回平台徽标「视频号」
+  （`platform_raw=sph`）。
+- **字段映射**：文案（description 全量，一次拿全无折叠）、作者昵称、点赞数
+  （`likeCountFmt` 支持「1.2万」格式）、发布时间（unix → 本地时间）、封面
+  （`cover_url`，已加入 `/api/cover` 白名单 `finder.video.qq.com`）、规范链接
+  `https://weixin.qq.com/sph/{id}`；无独立 title 字段 → 取文案首行。
+- **关键技术点（实测 9/9 真实链接）**：
+  - 接口无 cookie/签名/登录态，但 **TLS/HTTP2 指纹层会拒绝非浏览器客户端**
+    （requests/curl → `permission verification failed`）；用 `curl_cffi
+    impersonate="chrome"` 复刻 Chrome 指纹后全部通过。排查方法：页面内同请求体
+    fetch 成功 + 全程零 cookie → 排除 cookie/头/参数，锁定传输层指纹。
+  - 成功响应是 **HTTP 201**（非 200），判定需兼容。
+  - 依赖 `curl_cffi>=0.16` 已登记 requirements.txt 并装入 venv。
+- **归因与边界（红线不破）**：新 `error_kind=sph_link_invalid`（「转发文字」里
+  无链接时引导用户「点分享→复制链接」）→ `outcome_class` 仍映射回
+  `invalid_input`，粗粒度 5 值不变；`_ERROR_HINT_BY_KIND` 与「仅支持…」用户文案
+  同步带上视频号（全仓 grep 过，仅 lib/extractor.py 一处来源）。
+- **平台闸门**：`SPH_GATE_CONCURRENCY=2 / SPH_GATE_INTERVAL=0.2s`（环境变量可调）；
+  SSRF 白名单加 `weixin.qq.com`；作品级缓存复用现有 `public_work_cache`
+  （post_id = sph 短码）。
+- **验收**：9/9 sph 链接成功（单条 API 耗时 164ms，二次请求缓存命中 0ms）；
+  抖音/小红书真实链接回归正常；无短码输入正确引导、不发平台请求；
+  封面经代理出图 110KB；`ops/tests` 102 项全过（新增 test_sph.py 22 项）。
+- ⚠️ 观察项：该接口是公开分享预览页所用，上线初期留意频率风控态度；
+  封面 CDN 链接带 token 可能有时效，已由 `/api/cover` 24h 缓存兜住。
+
+
 ### 新增（v1.12.1 · 2026-09-28）· 短链解析结果缓存
 
 - **短链 → 笔记页 URL 的 30min 结果缓存**（`_shortlink_resolved_cached`，TTL
