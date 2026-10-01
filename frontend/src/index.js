@@ -67,4 +67,11 @@ window.addEventListener("load", function () {
     const el = document.getElementById("appVersion");
     if (el && d && d.version) el.textContent = d.version;
   }).catch(() => {});
+  // 「读剪贴板提取」按能力显隐（v1.18.1）：clipboard.readText 只在安全上下文
+  // （HTTPS/localhost）可用。服务目前是明文 HTTP，按钮**直接隐藏**——
+  // 与其放一个点了必定失败的按钮，不如没有；将来上 HTTPS 它会自己出现。
+  const clipBtn = document.getElementById("btnClipboard");
+  if (clipBtn && !(window.isSecureContext && navigator.clipboard && typeof navigator.clipboard.readText === "function")) {
+    clipBtn.classList.add("hidden");
+  }
 });
