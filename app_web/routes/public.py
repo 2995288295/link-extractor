@@ -586,7 +586,7 @@ def api_profile_get():
     conn = _get_db()
     try:
         account = conn.execute(
-            "SELECT name, identity FROM member_accounts WHERE member_key = ?", (device_id,)
+            "SELECT name, identity, pin_hash FROM member_accounts WHERE member_key = ?", (device_id,)
         ).fetchone()
         hint = ""
         if account is None:
@@ -602,6 +602,9 @@ def api_profile_get():
         "name": (account["name"] if account else ""),
         "identity": account_identity,
         "identity_label": _MEMBER_IDENTITIES.get(account_identity, ""),
+        # 是否已设同步码：未设时前端在统计页给一条轻量提示（v1.18.3）。
+        # 不然已登录成员永远不知道可以去补设，保护状态会一直空着。
+        "code_set": bool(account and account["pin_hash"]),
         "hint_name": hint,
         "identities": [{"key": k, "label": v} for k, v in _MEMBER_IDENTITIES.items()],
     }

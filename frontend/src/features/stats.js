@@ -39,11 +39,19 @@ function renderMonthlyCard(monthly, profile) {
   const nameHtml = name
     ? `${esc(name)} ${identityChip} <button class="btn btn-sm btn-ghost" onclick="openLoginModal('${esc(name)}')">修改信息</button> <button class="btn btn-sm btn-ghost" onclick="logout()">退出登录</button>`
     : `<button class="btn btn-sm btn-primary" onclick="openLoginModal('')">登录</button>`;
+  // 未设同步码的轻量提示（v1.18.3）：已登录成员不会再看引导框，没这条提示
+  // 他们往往不知道可以补设，保护状态就一直空着。设了就消失。
+  const codeHint = (name && profile && profile.code_set === false)
+    ? `<div style="margin-top:8px;padding:8px 10px;background:var(--warn-soft);border:1px solid var(--warn-border);border-radius:8px;font-size:12px;color:var(--warn-ink);">
+         还未设置同步码：点「修改信息」填一个 4 位数，即可保护你的记录不被同名进入，并支持多设备同步。
+       </div>`
+    : "";
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
       <h2 style="margin:0;">本月有效条数：<span style="color:var(--primary);font-size:24px;">${monthly.valid_count}</span> 条</h2>
       <div>${nameHtml}</div>
     </div>
+    ${codeHint}
     <div style="color:var(--text2);font-size:13px;margin-top:8px;">
       抖音 ${c.douyin || 0} · 小红书 ${c.xiaohongshu || 0} · 视频号 ${c.sph || 0}（同一内容已去重）
       ｜ 计法：抖音 1 条 · 小红书 0.5 条 · 视频号 0.5 条
