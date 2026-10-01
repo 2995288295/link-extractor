@@ -11,9 +11,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="链接提取">
 <title>链接提取工具</title>
-  <script type="module" crossorigin src="/assets/index-BfSJTiQ2.js"></script>
+  <script type="module" crossorigin src="/assets/index-B58MkjiV.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
-  <link rel="stylesheet" crossorigin href="/assets/index-8oYeodg_.css">
+  <link rel="stylesheet" crossorigin href="/assets/index-XnekjgS8.css">
 </head>
 <body>
 
@@ -92,6 +92,12 @@
     <h2 class="name-modal-title">先设置你的姓名</h2>
     <p class="name-modal-desc">请填写真实姓名。</p>
     <input id="memberNameInput" class="name-modal-input" type="text" maxlength="20" placeholder="请输入真实姓名（如：张三）" onkeydown="if(event.key==='Enter')saveMemberName()">
+    <div class="identity-label">你的身份</div>
+    <div class="identity-choices" id="identityChoices">
+      <button type="button" class="identity-btn id-signed" data-identity="signed" onclick="selectIdentity('signed')">签约创作者</button>
+      <button type="button" class="identity-btn id-ambassador" data-identity="ambassador" onclick="selectIdentity('ambassador')">创作大使</button>
+      <button type="button" class="identity-btn id-school" data-identity="school" onclick="selectIdentity('school')">学校/区域创作者</button>
+    </div>
     <div class="name-modal-actions">
       <button class="btn btn-ghost" onclick="skipMemberName()">暂不设置</button>
       <button class="btn btn-primary" onclick="saveMemberName()">保存</button>

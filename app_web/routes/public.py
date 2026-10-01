@@ -289,20 +289,33 @@ def api_extract():
 
 # ------------------------------------------------ 成员署名（v1.14.0 · 2026-10-01）
 
+# 身份枚举（v1.17.0）：成员自选一种，后台按身份分组看产量。
+# 存 code 不存中文标签——标签调整不必刷历史数据。
+_MEMBER_IDENTITIES = {
+    "signed": "签约创作者",
+    "ambassador": "创作大使",
+    "school": "学校/区域创作者",
+}
+
+
 def _ensure_members_table() -> None:
-    """成员署名表：device_id ↔ 真实姓名。
+    """成员署名表：device_id ↔ 真实姓名（+ 身份）。
 
     延迟建表（IF NOT EXISTS 幂等，重复调用无副作用），避免改 db.py 的建表序列。
     姓名只是**署名标记**（无密码，可随意填），用途是后台按人聚合产量；
     同一人换设备重填即产生新映射，后台按 name 而非 device_id 聚合。
+    v1.17.0 增加 identity 列：老表用 PRAGMA 探测后 ALTER 补列（幂等）。
     """
     conn = _get_db()
     try:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS members ("
-            "device_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "device_id TEXT PRIMARY KEY, name TEXT NOT NULL, identity TEXT DEFAULT '', "
             "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(members)")}
+        if "identity" not in columns:
+            conn.execute("ALTER TABLE members ADD COLUMN identity TEXT DEFAULT ''")
         conn.commit()
     finally:
         conn.close()
@@ -319,11 +332,16 @@ def api_profile_get():
     conn = _get_db()
     try:
         row = conn.execute(
-            "SELECT name FROM members WHERE device_id = ?", (device_id,)
+            "SELECT name, identity FROM members WHERE device_id = ?", (device_id,)
         ).fetchone()
     finally:
         conn.close()
-    resp = {"success": True, "name": (row["name"] if row else "")}
+    resp = {
+        "success": True,
+        "name": (row["name"] if row else ""),
+        "identity": (row["identity"] if row else ""),
+        "identities": [{"key": k, "label": v} for k, v in _MEMBER_IDENTITIES.items()],
+    }
     resp.update(_device_cookie_payload(device_id, device_sig))
     return jsonify(resp)
 
@@ -342,20 +360,29 @@ def api_profile_set():
         return jsonify({"success": False, "error": "请输入姓名"}), 400
     if len(name) > 20:
         return jsonify({"success": False, "error": "姓名不能超过 20 个字"}), 400
+    identity = str(payload.get("identity") or "").strip()
+    if identity and identity not in _MEMBER_IDENTITIES:
+        return jsonify({"success": False, "error": "身份选择有误，请重新选择"}), 400
 
     _ensure_members_table()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_db()
     try:
         conn.execute(
-            "INSERT INTO members (device_id, name, created_at, updated_at) VALUES (?,?,?,?) "
-            "ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at",
-            (device_id, name, now, now),
+            "INSERT INTO members (device_id, name, identity, created_at, updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, identity = excluded.identity, "
+            "updated_at = excluded.updated_at",
+            (device_id, name, identity, now, now),
         )
         conn.commit()
     finally:
         conn.close()
-    resp = {"success": True, "name": name}
+    resp = {
+        "success": True,
+        "name": name,
+        "identity": identity,
+        "identity_label": _MEMBER_IDENTITIES.get(identity, ""),
+    }
     resp.update(_device_cookie_payload(device_id, device_sig))
     return jsonify(resp)
 
@@ -378,7 +405,7 @@ def api_admin_members():
     try:
         rows = conn.execute(
             "SELECT h.device_id, h.original_url, h.canonical_url, h.platform, "
-            "h.status, h.created_at, m.name AS member_name "
+            "h.status, h.created_at, m.name AS member_name, m.identity AS member_identity "
             "FROM history h LEFT JOIN members m ON m.device_id = h.device_id"
         ).fetchall()
     finally:
@@ -391,12 +418,16 @@ def api_admin_members():
         if g is None:
             g = groups[name] = {
                 "name": name,
+                "identity": "",
                 "device_ids": set(),
                 "ok_total": 0,
                 "month_keys": set(),
                 "month_counts": {"douyin": 0, "xiaohongshu": 0, "sph": 0},
                 "last_active": "",
             }
+        # 同一姓名跨设备时取任一非空身份（同一人不同设备通常选同一种）
+        if not g["identity"] and row["member_identity"]:
+            g["identity"] = str(row["member_identity"])
         g["device_ids"].add(row["device_id"])
         created = str(row["created_at"] or "")
         if created > g["last_active"]:
@@ -419,6 +450,8 @@ def api_admin_members():
                     + g["month_counts"]["sph"] * _MONTHLY_WEIGHTS["视频号"])
         members.append({
             "name": g["name"],
+            "identity": g["identity"],
+            "identity_label": _MEMBER_IDENTITIES.get(g["identity"], ""),
             "valid_month": int(weighted) if weighted == int(weighted) else round(weighted, 2),
             "month_counts": g["month_counts"],
             "ok_total": g["ok_total"],
@@ -426,9 +459,16 @@ def api_admin_members():
             "last_active": g["last_active"],
         })
     members.sort(key=lambda m: (-m["valid_month"], -m["ok_total"], m["name"]))
+    # 身份分布（按人数）：让后台一眼看到三种身份各有多少人
+    identity_dist = {label: 0 for label in _MEMBER_IDENTITIES.values()}
+    identity_dist["未选择"] = 0
+    for m in members:
+        identity_dist[m["identity_label"] or "未选择"] += 1
     return jsonify({
         "success": True,
         "month": datetime.now().strftime("%Y-%m"),
+        "identities": [{"key": k, "label": v} for k, v in _MEMBER_IDENTITIES.items()],
+        "identity_dist": identity_dist,
         "members": members,
     })
 

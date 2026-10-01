@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>运营看板 · 链接提取工具</title>
-  <script type="module" crossorigin src="/assets/admin-ZHyBxQGz.js"></script>
+  <script type="module" crossorigin src="/assets/admin-ByyHAgJg.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
   <link rel="stylesheet" crossorigin href="/assets/admin-D6lOd26g.css">
 </head>
@@ -84,10 +84,11 @@
     <div class="card dashboard-module full" data-module="members" data-title="成员署名排行"><div class="module-head"><span class="drag-handle">⠿</span><b>成员署名排行</b><span class="module-actions"></span></div>
       <h2>成员署名排行</h2>
       <p class="updated" style="margin:0 0 8px;">按姓名聚合 · 本月有效 = 去重后加权（抖音 1 / 小红书 0.5 / 视频号 0.5）· 分平台列顺序：抖音 / 小红书 / 视频号 · 未署名设备计入「未署名」</p>
+      <div id="identityDist" class="kind-chips" style="margin-bottom:10px;"></div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>成员</th><th class="num">本月有效</th><th class="num">本月分平台</th><th class="num">累计成功</th><th class="num">设备数</th><th>最近活跃</th></tr></thead>
-          <tbody id="memberBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+          <thead><tr><th>成员</th><th>身份</th><th class="num">本月有效</th><th class="num">本月分平台</th><th class="num">累计成功</th><th class="num">设备数</th><th>最近活跃</th></tr></thead>
+          <tbody id="memberBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
         </table>
       </div>
       <div id="memberEmpty" class="empty hidden">暂无成员数据</div>

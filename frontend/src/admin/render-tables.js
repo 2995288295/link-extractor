@@ -26,7 +26,7 @@ export function renderDevices(devices) {
 }
 
 /** 成员署名排行（v1.14.0）：后端已按姓名聚合排序，前端纯展示。 */
-export function renderMembers(members) {
+export function renderMembers(members, dist) {
   const body = document.getElementById("memberBody");
   const empty = document.getElementById("memberEmpty");
   if (!body || !empty) return;
@@ -39,12 +39,31 @@ export function renderMembers(members) {
   body.innerHTML = members.map((m, i) => `
     <tr>
       <td><b>${esc(m.name)}</b>${i === 0 && members.length > 1 && m.valid_month > 0 ? ' <span class="result-badge badge-ok">本月第一</span>' : ""}</td>
+      <td>${identityChip(m)}</td>
       <td class="num"><b>${fmt(m.valid_month)}</b></td>
       <td class="num" style="color:var(--text2);font-size:12px;">${fmt(m.month_counts?.douyin || 0)} / ${fmt(m.month_counts?.xiaohongshu || 0)} / ${fmt(m.month_counts?.sph || 0)}</td>
       <td class="num">${fmt(m.ok_total)}</td>
       <td class="num">${fmt(m.device_count)}</td>
       <td style="color:var(--text2);font-size:12px;">${esc(m.last_active || "-")}</td>
     </tr>`).join("");
+  renderIdentityDist(dist);
+}
+
+/** 身份徽标：与用户页 .identity-btn 同一套配色（id-* 类名对齐） */
+function identityChip(m) {
+  if (!m.identity) return '<span style="color:var(--text2);font-size:12px;">未选择</span>';
+  return `<span class="identity-chip id-${esc(m.identity)}">${esc(m.identity_label || m.identity)}</span>`;
+}
+
+/** 身份分布（v1.17.0）：后台一眼看到三种身份各有多少人 */
+function renderIdentityDist(dist) {
+  const el = document.getElementById("identityDist");
+  if (!el) return;
+  const entries = Object.entries(dist || {});
+  if (!entries.length) { el.innerHTML = ""; return; }
+  el.innerHTML = entries.map(([label, n]) =>
+    `<span class="kind-chip">${esc(label)} <b>${fmt(n)}</b> 人</span>`
+  ).join("");
 }
 
 // 细粒度归因的中文说明：看板不再只显示「平台暂时限制」这句万能文案，

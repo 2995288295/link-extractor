@@ -29,9 +29,15 @@ function renderMonthlyCard(monthly, profile) {
   }
   const c = monthly.counts || {};
   const serverName = (profile && profile.name) || "";
+  const serverIdentity = (profile && profile.identity) || "";
   const name = serverName || state.memberName || "";
+  const identity = serverIdentity || state.memberIdentity || "";
+  const identityLabels = { signed: "签约创作者", ambassador: "创作大使", school: "学校/区域创作者" };
+  const identityChip = identity
+    ? `<span class="identity-chip id-${esc(identity)}">${esc(identityLabels[identity] || identity)}</span>`
+    : "";
   const nameHtml = name
-    ? `<span style="font-weight:600;">${esc(name)}</span> <button class="btn btn-sm btn-ghost" onclick="openNameModal()">改名</button>`
+    ? `${esc(name)} ${identityChip} <button class="btn btn-sm btn-ghost" onclick="openNameModal()">修改信息</button>`
     : `<button class="btn btn-sm btn-primary" onclick="openNameModal()">设置姓名</button>`;
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">

@@ -346,3 +346,32 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   .name-modal-box { padding: 18px; }
   .monthly-banner { flex-direction: column; align-items: flex-start; gap: 4px; }
 }
+
+/* ===== 身份选择（v1.17.0）=====
+ * 三种身份各一套配色（填充/描边/文字三态），选中 = 彩色描边 + 对应浅底。
+ * 配色取既有语义色系：签约=品牌蓝、大使=紫、学校/区域=绿。 */
+.identity-label { font-size: 13px; color: var(--ink-2); margin: 16px 0 8px; }
+.identity-choices { display: flex; gap: 8px; }
+.identity-btn {
+  flex: 1; padding: 10px 4px; border-radius: 10px; cursor: pointer;
+  border: 1.5px solid var(--border-strong); background: var(--surface);
+  color: var(--ink-2); font-size: 13px; font-weight: 600; line-height: 1.3;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.identity-btn:hover { border-color: var(--ink-3); }
+.identity-btn.selected.id-signed { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-soft-ink); }
+.identity-btn.selected.id-ambassador { border-color: #7C5CFC; background: #F1EBFE; color: #5B2EC4; }
+.identity-btn.selected.id-school { border-color: var(--ok); background: #E8F8EE; color: #077A43; }
+/* 身份徽标（统计页 / 后台排行复用同一套色） */
+.identity-chip {
+  display: inline-block; padding: 1px 8px; border-radius: var(--r-full, 999px);
+  font-size: 12px; font-weight: 600; margin: 0 4px; vertical-align: 1px;
+}
+.identity-chip.id-signed { background: var(--brand-soft); color: var(--brand-soft-ink); }
+.identity-chip.id-ambassador { background: #F1EBFE; color: #5B2EC4; }
+.identity-chip.id-school { background: #E8F8EE; color: #077A43; }
+
+/* 小屏：三个身份按钮仍横排，字号收紧防换行溢出 */
+@media (max-width: 480px) {
+  .identity-btn { font-size: 12px; padding: 9px 2px; }
+}

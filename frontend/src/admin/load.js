@@ -56,7 +56,7 @@ export async function loadDetails() {
   renderDevices(state.deviceCache);        // 内部自己读搜索框 / 排序，行为与改前一致
   renderErrors(state.lastErrors, state.lastErrorKinds);
   renderRecent(state.recentCache);
-  renderMembers(membersRes.members || []); // 成员署名排行（v1.14.0）
+  renderMembers(membersRes.members || [], membersRes.identity_dist); // 成员署名排行（v1.14.0，身份 v1.17.0）
 }
 
 /* 轮询 / 回到前台用：失败静默，仅 401 才登出（避免未捕获的 Promise rejection） */
