@@ -2,8 +2,9 @@ const LAYOUT_KEY = "link-extractor-admin-layout-v1";
 let layoutEditing = false, layoutSnapshot = null;
 /* v1.17.2：补登记 "members"（v1.14.0 新增的成员署名模块当时漏了它）。
    不登记的后果：老用户浏览器里的旧布局、或点「恢复默认」时，applyLayout 只
-   append 清单内模块，members 从未被移动 → 被挤到看板最顶部（视觉错位）。 */
-const defaultLayout = ["status","alerts","metrics","performance","insights","members","devices","analysis","pool"];
+   append 清单内模块，members 从未被移动 → 被挤到看板最顶部（视觉错位）。
+   v1.18.0：再补 "retryhot"（重试热点），放在 devices 之后、失败诊断之前。 */
+const defaultLayout = ["status","alerts","metrics","performance","insights","members","retryhot","devices","analysis","pool"];
 export function layoutModules() { return [...document.querySelectorAll("#dashboardGrid > .dashboard-module")]; }
 export function readLayout() { try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "null"); } catch (_) { return null; } }
 export function saveLayout() { const data = layoutModules().map(m => ({id:m.dataset.module, size:m.classList.contains("half") ? "half" : m.classList.contains("third") ? "third" : "full", hidden:m.classList.contains("module-hidden")})); localStorage.setItem(LAYOUT_KEY, JSON.stringify(data)); }

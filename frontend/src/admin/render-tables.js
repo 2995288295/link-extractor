@@ -25,6 +25,32 @@ export function renderDevices(devices) {
   more.textContent = expanded.devices ? "收起设备列表" : `展开全部设备（${filtered.length}）`;
 }
 
+/** 重试热点（v1.18.0）：接上闲置已久的 /api/admin/retry_hot 接口。
+ *  看的是「同一链接被提交多少次」——提交越多说明成员越反复受阻。 */
+export function renderRetryHot(items) {
+  const body = document.getElementById("retryHotBody");
+  const empty = document.getElementById("retryHotEmpty");
+  if (!body || !empty) return;
+  const rows = (items || []).filter(it => Number(it.count) > 1);
+  if (!rows.length) {
+    body.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  body.innerHTML = rows.map(it => {
+    const fail = Number(it.fail || 0);
+    const failCell = fail > 0 ? `<td class="num fail">${fmt(fail)}</td>` : `<td class="num">0</td>`;
+    return `<tr>
+      <td class="link" title="${esc(it.url)}">${esc(String(it.url).slice(0, 60))}</td>
+      <td class="num"><b>${fmt(it.count)}</b></td>
+      <td class="num ok">${fmt(it.ok || 0)}</td>
+      ${failCell}
+      <td style="color:var(--text2);font-size:12px;">${esc((it.last_at || "").slice(5, 16))}</td>
+    </tr>`;
+  }).join("");
+}
+
 /** 成员署名排行（v1.14.0）：后端已按姓名聚合排序，前端纯展示。 */
 export function renderMembers(members, dist) {
   renderIdentityDist(dist); // 先刷新分布：空数据时也要清掉旧 chips（v1.17.2）

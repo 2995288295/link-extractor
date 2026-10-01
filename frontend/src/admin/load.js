@@ -1,6 +1,6 @@
 import { adminFetch, fmt, logout, showToast } from "./core.js";
 import { state } from "./state.js";
-import { renderDevices, renderErrors, renderRecent, renderMembers } from "./render-tables.js";
+import { renderDevices, renderErrors, renderRecent, renderMembers, renderRetryHot } from "./render-tables.js";
 import { renderTrend, renderPlatform, renderPlatformHealth, renderServiceStatus, renderAlerts } from "./render-metrics.js";
 import { loadPool } from "./pool.js";
 
@@ -39,15 +39,16 @@ export async function loadCore() {
     renderAlerts(ov, perf, healthRes);
 }
 
-/* ===== 明细列表：变化慢 → 只在全量刷新时拉（4 请求） ===== */
+/* ===== 明细列表：变化慢 → 只在全量刷新时拉（5 请求） ===== */
 export async function loadDetails() {
   const range = document.getElementById("rangeSelect").value;
   const q = `?range=${encodeURIComponent(range)}`;
-  const [dev, errs, recent, membersRes] = await Promise.all([
+  const [dev, errs, recent, membersRes, hotRes] = await Promise.all([
     adminFetch("/api/admin/devices" + q + "&limit=100"),
     adminFetch("/api/admin/errors" + q),
     adminFetch("/api/admin/recent" + q),
     adminFetch("/api/admin/members"),
+    adminFetch("/api/admin/retry_hot" + q),
   ]);
   state.deviceCache = dev.devices || [];
   state.recentCache = recent.items || [];
@@ -57,6 +58,7 @@ export async function loadDetails() {
   renderErrors(state.lastErrors, state.lastErrorKinds);
   renderRecent(state.recentCache);
   renderMembers(membersRes.members || [], membersRes.identity_dist); // 成员署名排行（v1.14.0，身份 v1.17.0）
+  renderRetryHot(hotRes.items || []);      // 重试热点（v1.18.0，接口闲置至今首次接上）
 }
 
 /* 轮询 / 回到前台用：失败静默，仅 401 才登出（避免未捕获的 Promise rejection） */

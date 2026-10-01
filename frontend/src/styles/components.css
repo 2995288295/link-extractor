@@ -375,3 +375,6 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
 @media (max-width: 480px) {
   .identity-btn { font-size: 12px; padding: 9px 2px; }
 }
+
+/* PIN 输入框与身份标签的辅助说明（v1.18.0 登录体系） */
+.identity-label-hint { font-weight: 400; color: var(--ink-3); font-size: 12px; margin-left: 4px; }

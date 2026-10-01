@@ -7,7 +7,7 @@ import { doExtract, retryLink, retryFailedLinks, readClipboardExtract } from "./
 import { copyText } from "./features/copy.js";
 import { toggleCaption } from "./features/results.js";
 import { loadHistory, clearHistory, setHistoryFilter, onHistorySearch } from "./features/history.js";
-import { initProfile, openNameModal, saveMemberName, skipMemberName, selectIdentity } from "./features/profile.js";
+import { initProfile, openLoginModal, submitSession, skipMemberName, selectIdentity, logout } from "./features/profile.js";
 import { unescapeHtml } from "./core/dom.js";
 
 /* ------------------------------------------------------------------
@@ -24,7 +24,7 @@ Object.assign(window, {
   openCoverPreview, closeCoverPreview, closeCoverPreviewOnBackdrop,
   unescapeHtml,
   readClipboardExtract, setHistoryFilter, onHistorySearch,
-  openNameModal, saveMemberName, skipMemberName, selectIdentity,
+  openLoginModal, submitSession, skipMemberName, selectIdentity, logout,
 });
 
 // ---------- 移动端交互（C 项） ----------

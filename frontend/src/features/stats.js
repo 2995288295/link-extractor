@@ -37,8 +37,8 @@ function renderMonthlyCard(monthly, profile) {
     ? `<span class="identity-chip id-${esc(identity)}">${esc(identityLabels[identity] || identity)}</span>`
     : "";
   const nameHtml = name
-    ? `${esc(name)} ${identityChip} <button class="btn btn-sm btn-ghost" onclick="openNameModal()">修改信息</button>`
-    : `<button class="btn btn-sm btn-primary" onclick="openNameModal()">设置姓名</button>`;
+    ? `${esc(name)} ${identityChip} <button class="btn btn-sm btn-ghost" onclick="openLoginModal('${esc(name)}')">修改信息</button> <button class="btn btn-sm btn-ghost" onclick="logout()">退出登录</button>`
+    : `<button class="btn btn-sm btn-primary" onclick="openLoginModal('')">登录</button>`;
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
       <h2 style="margin:0;">本月有效条数：<span style="color:var(--primary);font-size:24px;">${monthly.valid_count}</span> 条</h2>

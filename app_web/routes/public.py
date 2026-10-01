@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import random
 import re
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, wait
 from datetime import datetime, timedelta
 
@@ -18,11 +21,11 @@ from flask import Response, jsonify, request
 from lib.extractor import extract_link
 
 from .. import app
-from ..config import SERVICE_STARTED_AT, VERSION, _effective_extract_concurrency, _extract_queue, log
+from ..config import DEVICE_SECRET, SERVICE_STARTED_AT, VERSION, _effective_extract_concurrency, _extract_queue, log
 from ..db import _get_db
 from ..outcome import _classify_outcome
-from ..ratelimit import _rate_limit_check
-from ..security import _admin_require_rate, _device_cookie_payload, _get_device
+from ..ratelimit import _check_rate_limit, _rate_limit_check
+from ..security import _admin_require_rate, _device_cookie_payload, _get_device, _sign_device_id
 
 # 每台设备的历史保留条数（v1.13.1 起 200 → 1000）：
 # 「本月有效条数」按历史表统计，高产用户一个月可超 200 条，保留过短会静默少算。
@@ -289,7 +292,7 @@ def api_extract():
 
 
 
-# ------------------------------------------------ 成员署名（v1.14.0 · 2026-10-01）
+# ------------------------------------------------ 成员账号（v1.14.0 署名 → v1.18.0 登录体系）
 
 # 身份枚举（v1.17.0）：成员自选一种，后台按身份分组看产量。
 # 存 code 不存中文标签——标签调整不必刷历史数据。
@@ -299,20 +302,29 @@ _MEMBER_IDENTITIES = {
     "school": "学校/区域创作者",
 }
 
-# members 表是否已确认存在（进程级缓存）：建表是写事务，
-# 早期每次 GET /api/profile 都跑一遍 CREATE TABLE IF NOT EXISTS + 提交，
-# 白给 SQLite 加写压力（v1.17.2 改为只确认一次）。
+# 两张表的分工（v1.18.0 起）：
+#   members         device_id → 姓名 的设备登记表（v1.14.0 就有，保留；
+#                    用途：记录某台设备归属哪个成员，供后台统计设备数）
+#   member_accounts 姓名 → PIN哈希/身份 的账号表（新增，登录的真正依据）
+# history.device_id 在成员登录后**就是姓名**——所有历史/统计/去重逻辑
+# 因此自动按人隔离；换设备登录同一姓名即合并，下游查询一行都不用改。
+
 _members_table_ready = False
+_accounts_table_ready = False
+
+
+def _new_member_key() -> str:
+    """成员键：ASCII 短键（可安全放进 HTTP 头）。
+
+    为什么不能用中文姓名当凭证：WSGI 按 Latin-1 解析请求头，中文必成乱码，
+    HMAC 校验永远失败（v1.18.0 首版实测：登录成功、凭证却用不了）。
+    所以头里传 key，服务端 key → 姓名 映射。
+    """
+    return "m" + uuid.uuid4().hex[:10]
 
 
 def _ensure_members_table() -> None:
-    """成员署名表：device_id ↔ 真实姓名（+ 身份）。
-
-    延迟建表（IF NOT EXISTS 幂等），避免改 db.py 的建表序列。
-    姓名只是**署名标记**（无密码，可随意填），用途是后台按人聚合产量；
-    同一人换设备重填即产生新映射，后台按 name 而非 device_id 聚合。
-    v1.17.0 增加 identity 列：老表用 PRAGMA 探测后 ALTER 补列（幂等）。
-    """
+    """设备登记表：device_id → 姓名（v1.14.0 引入，v1.18.0 起只做设备归属登记）。"""
     global _members_table_ready
     if _members_table_ready:
         return
@@ -332,67 +344,241 @@ def _ensure_members_table() -> None:
         conn.close()
 
 
-@app.route("/api/profile", methods=["GET"])
-def api_profile_get():
-    ip = request.remote_addr or "127.0.0.1"
-    device_id, device_sig, device_valid = _get_device(request)
-    if not _rate_limit_check(ip, device_id if device_valid else ""):
-        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
-
-    _ensure_members_table()
+def _ensure_accounts_table() -> None:
+    """账号表：姓名即账号（主键），PIN 哈希 + 身份。"""
+    global _accounts_table_ready
+    if _accounts_table_ready:
+        return
     conn = _get_db()
     try:
-        row = conn.execute(
-            "SELECT name, identity FROM members WHERE device_id = ?", (device_id,)
-        ).fetchone()
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS member_accounts ("
+            "name TEXT PRIMARY KEY, member_key TEXT NOT NULL DEFAULT '', "
+            "pin_hash TEXT NOT NULL DEFAULT '', "
+            "identity TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(member_accounts)")}
+        if "member_key" not in columns:
+            # 老库（v1.18.0 首版建的，没有 key 列）补列，下面紧接着补数据
+            conn.execute("ALTER TABLE member_accounts ADD COLUMN member_key TEXT NOT NULL DEFAULT ''")
+        for r in conn.execute("SELECT name FROM member_accounts WHERE member_key = ''").fetchall():
+            conn.execute(
+                "UPDATE member_accounts SET member_key = ? WHERE name = ?",
+                (_new_member_key(), r["name"]),
+            )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_key ON member_accounts(member_key)")
+        conn.commit()
+        _accounts_table_ready = True
     finally:
         conn.close()
-    resp = {
-        "success": True,
-        "name": (row["name"] if row else ""),
-        "identity": (row["identity"] if row else ""),
-        "identities": [{"key": k, "label": v} for k, v in _MEMBER_IDENTITIES.items()],
-    }
-    resp.update(_device_cookie_payload(device_id, device_sig))
-    return jsonify(resp)
 
 
-@app.route("/api/profile", methods=["POST"])
-def api_profile_set():
-    """登记/更新署名。无密码：姓名可冒填，定位是区分产量而非鉴权。"""
+def _hash_pin(pin: str) -> str:
+    """PIN 哈希：HMAC(DEVICE_SECRET, pin)。
+
+    4 位 PIN 空间只有 1 万，哈希挡不住针对性爆破——它的作用是「库被看一眼
+    不会直接拿到所有人的 PIN」；爆破由 /api/session 的按姓名登录限速负责。
+    不值得引 bcrypt：内部小工具， proportionate 即可。
+    """
+    return hmac.new(DEVICE_SECRET.encode("utf-8"), pin.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _migrate_to_accounts() -> None:
+    """一次性迁移（v1.18.0）：旧「设备→姓名」体系 → 「姓名账号」体系。
+
+    做两件事：
+      1. 按姓名建账号（同姓名的多台设备合并成一个账号；PIN 留空，等成员
+         首次登录时自行设置；身份继承自已填的 identity）；
+      2. history.device_id 回填为姓名，让老数据在新体系下继续可见。
+
+    幂等条件 =「还有 history 行的 device_id 命中 members」。迁完后新行的
+    device_id 只会是姓名或匿名 UUID，该条件永不成立 → 重复调用是空操作，
+    不需要额外的迁移标记表。
+    """
+    _ensure_members_table()
+    _ensure_accounts_table()
+    conn = _get_db()
+    try:
+        pending = conn.execute(
+            "SELECT 1 FROM history WHERE device_id IN (SELECT device_id FROM members WHERE name != '') "
+            "OR device_id IN (SELECT name FROM member_accounts) LIMIT 1"
+        ).fetchone()
+        if not pending:
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = conn.execute(
+            "SELECT name, MAX(CASE WHEN identity != '' THEN identity END) AS identity "
+            "FROM members WHERE name != '' GROUP BY name"
+        ).fetchall()
+        for r in rows:
+            conn.execute(
+                "INSERT INTO member_accounts (name, member_key, pin_hash, identity, created_at, updated_at) "
+                "VALUES (?, ?, '', ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "identity = CASE WHEN excluded.identity != '' THEN excluded.identity "
+                "ELSE member_accounts.identity END",
+                (r["name"], _new_member_key(), r["identity"] or "", now, now),
+            )
+        conn.execute(
+            "UPDATE history SET device_id = (SELECT a.member_key FROM member_accounts a "
+            "WHERE a.name = (SELECT m.name FROM members m WHERE m.device_id = history.device_id)) "
+            "WHERE device_id IN (SELECT device_id FROM members WHERE name != '') "
+            "AND EXISTS (SELECT 1 FROM member_accounts a WHERE a.name = "
+            "(SELECT m.name FROM members m WHERE m.device_id = history.device_id))"
+        )
+        # 3b) 首版误按姓名存的 → key
+        conn.execute(
+            "UPDATE history SET device_id = (SELECT member_key FROM member_accounts WHERE name = history.device_id) "
+            "WHERE device_id IN (SELECT name FROM member_accounts)"
+        )
+        conn.commit()
+        log.warning("成员体系迁移完成：%d 个姓名账号，history 已按 member_key 回填", len(rows))
+    finally:
+        conn.close()
+
+
+@app.route("/api/session", methods=["POST"])
+def api_session():
+    """登录 / 注册 / 认领（v1.18.0）：姓名 + 4 位 PIN，三种情况一个入口。
+
+      - 姓名不存在           → 注册（必须选身份），本次 PIN 成为账号 PIN
+      - 姓名存在、PIN 为空    → 老成员首次认领，设置自己的 PIN
+      - 姓名存在、PIN 不匹配  → 403（不区分「姓名错」与「PIN 错」，防枚举）
+    成功后以**姓名**作为 device_id 签发（HMAC 签名），历史/统计自动按人隔离，
+    换设备登录同一姓名即合并——下游所有查询一行都不用改。
+    """
     ip = request.remote_addr or "127.0.0.1"
-    device_id, device_sig, device_valid = _get_device(request)
-    if not _rate_limit_check(ip, device_id if device_valid else ""):
+    # 当前设备标识（此时可能还是匿名 UUID）：用于把本设备登记到成员名下
+    cur_device, _cur_sig, _cur_valid = _get_device(request)
+    if not _check_rate_limit(ip, 30):
         return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
 
     payload = request.get_json(silent=True) or {}
     name = str(payload.get("name") or "").strip()
+    pin = str(payload.get("pin") or "").strip()
+    identity = str(payload.get("identity") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "请输入姓名"}), 400
     if len(name) > 20:
         return jsonify({"success": False, "error": "姓名不能超过 20 个字"}), 400
-    identity = str(payload.get("identity") or "").strip()
+    if not re.fullmatch(r"\d{4}", pin):
+        return jsonify({"success": False, "error": "PIN 需为 4 位数字"}), 400
     if identity and identity not in _MEMBER_IDENTITIES:
         return jsonify({"success": False, "error": "身份选择有误，请重新选择"}), 400
+    # PIN 爆破防护：按姓名限速（每分钟 5 次）。4 位 PIN 只有 1 万种组合，
+    # 不限速等于没设防——这是「姓名 + PIN」方案成立的前提。
+    if not _check_rate_limit(f"member-login:{name}", 5):
+        return jsonify({"success": False, "error": "尝试次数过多，请 1 分钟后再试"}), 429
 
-    _ensure_members_table()
+    _ensure_accounts_table()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = _get_db()
     try:
+        row = conn.execute(
+            "SELECT member_key, pin_hash, identity FROM member_accounts WHERE name = ?", (name,)
+        ).fetchone()
+        final_identity = (row["identity"] if row else "") or ""
+        new_key = ""  # 新建账号时先拿住 key，签发要用（row 为 None 时读不到）
+        if row is None:
+            if not identity:
+                return jsonify({"success": False, "error": "请选择身份"}), 400
+            new_key = _new_member_key()
+            conn.execute(
+                "INSERT INTO member_accounts (name, member_key, pin_hash, identity, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (name, new_key, _hash_pin(pin), identity, now, now),
+            )
+            final_identity = identity
+        elif row["pin_hash"]:
+            if not hmac.compare_digest(row["pin_hash"], _hash_pin(pin)):
+                return jsonify({"success": False, "error": "姓名或 PIN 不正确"}), 403
+            # 登录成功：允许顺手改身份（下次登录仍生效）
+            if identity and identity != final_identity:
+                conn.execute(
+                    "UPDATE member_accounts SET identity = ?, updated_at = ? WHERE name = ?",
+                    (identity, now, name),
+                )
+                final_identity = identity
+        else:
+            # 老成员认领：PIN 为空 → 本次提交的即为初始 PIN
+            conn.execute(
+                "UPDATE member_accounts SET pin_hash = ?, "
+                "identity = CASE WHEN ? != '' THEN ? ELSE identity END, updated_at = ? "
+                "WHERE name = ?",
+                (_hash_pin(pin), identity, identity, now, name),
+            )
+            if identity:
+                final_identity = identity
+        # 设备登记：这台设备以后归属该成员（供后台统计设备数）
         conn.execute(
             "INSERT INTO members (device_id, name, identity, created_at, updated_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, identity = excluded.identity, "
+            "ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, "
+            "identity = CASE WHEN excluded.identity != '' THEN excluded.identity ELSE members.identity END, "
             "updated_at = excluded.updated_at",
-            (device_id, name, identity, now, now),
+            (cur_device, name, final_identity, now, now),
         )
         conn.commit()
     finally:
         conn.close()
+
+    # 以 member_key 作为 device_id 签发——ASCII 才能进 HTTP 头（中文姓名会乱码）。
+    # 之后所有请求都按这个人隔离，换设备登录同一姓名即合并。
+    member_key = (row["member_key"] if row else new_key) or ""
     resp = {
         "success": True,
         "name": name,
-        "identity": identity,
-        "identity_label": _MEMBER_IDENTITIES.get(identity, ""),
+        "identity": final_identity,
+        "identity_label": _MEMBER_IDENTITIES.get(final_identity, ""),
+        "identities": [{"key": k, "label": v} for k, v in _MEMBER_IDENTITIES.items()],
+    }
+    resp.update(_device_cookie_payload(member_key, _sign_device_id(member_key)))
+    return jsonify(resp)
+
+
+@app.route("/api/session", methods=["DELETE"])
+def api_session_delete():
+    """退出登录。凭证在客户端，服务端只负责发一份新的匿名设备载荷；
+    前端清掉本地 member_* 后保存它即完成切换（历史不再按人可见）。"""
+    device_id, device_sig, _valid = _get_device(request)
+    resp = {"success": True}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
+
+
+@app.route("/api/profile", methods=["GET"])
+def api_profile_get():
+    """当前身份。name 为空 = 未登录（匿名）。
+
+    hint_name：本设备**曾经**归属哪个成员（迁移前的旧设备）——仅供登录框
+    预填，不代表已登录：历史已按姓名回填，旧设备号下什么都看不到。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    _migrate_to_accounts()
+    conn = _get_db()
+    try:
+        account = conn.execute(
+            "SELECT name, identity FROM member_accounts WHERE member_key = ?", (device_id,)
+        ).fetchone()
+        hint = ""
+        if account is None:
+            hint_row = conn.execute(
+                "SELECT name FROM members WHERE device_id = ?", (device_id,)
+            ).fetchone()
+            hint = (hint_row["name"] if hint_row else "") or ""
+    finally:
+        conn.close()
+    account_identity = (account["identity"] if account else "") or ""
+    resp = {
+        "success": True,
+        "name": (account["name"] if account else ""),
+        "identity": account_identity,
+        "identity_label": _MEMBER_IDENTITIES.get(account_identity, ""),
+        "hint_name": hint,
+        "identities": [{"key": k, "label": v} for k, v in _MEMBER_IDENTITIES.items()],
     }
     resp.update(_device_cookie_payload(device_id, device_sig))
     return jsonify(resp)
@@ -404,42 +590,45 @@ def api_admin_members():
 
     ⚠️ 放在本文件而非 routes/admin.py：复用上面的月度口径常量与去重键函数，
     避免为一条只读聚合路由跨模块拷贝口径（口径漂移过一次，别再来）。
-    未署名的设备聚合进「未署名」，产量不被漏看。鉴权走 /api/admin/* 钩子。
+    v1.18.0 起 history.device_id 在成员登录后即姓名，直接按它分组；
+    设备数另查 members 登记表（匿名设备聚合进「未署名」，产量不被漏看）。
     """
     ip = request.remote_addr or "127.0.0.1"
     if not _admin_require_rate(ip):
         return jsonify({"success": False, "error": "请求过于频繁"}), 429
 
-    _ensure_members_table()
+    _migrate_to_accounts()
     month_start = _month_start()
     conn = _get_db()
     try:
         rows = conn.execute(
             "SELECT h.device_id, h.original_url, h.canonical_url, h.platform, "
-            "h.status, h.created_at, m.name AS member_name, m.identity AS member_identity "
-            "FROM history h LEFT JOIN members m ON m.device_id = h.device_id"
+            "h.status, h.created_at, a.name AS member_name, a.identity AS member_identity "
+            "FROM history h LEFT JOIN member_accounts a ON a.member_key = h.device_id"
+        ).fetchall()
+        device_rows = conn.execute(
+            "SELECT name, COUNT(*) AS devices FROM members WHERE name != '' GROUP BY name"
         ).fetchall()
     finally:
         conn.close()
+    device_count = {r["name"]: r["devices"] for r in device_rows}
 
     groups = {}
     for row in rows:
-        name = str(row["member_name"] or "").strip() or "未署名"
+        account_hit = row["member_name"] is not None
+        name = str(row["member_name"] or "") if account_hit else "未署名"
         g = groups.get(name)
         if g is None:
             g = groups[name] = {
                 "name": name,
-                "identity": "",
-                "device_ids": set(),
+                "identity": (str(row["member_identity"]) if account_hit and row["member_identity"] else ""),
                 "ok_total": 0,
                 "month_keys": set(),
                 "month_counts": {"douyin": 0, "xiaohongshu": 0, "sph": 0},
                 "last_active": "",
             }
-        # 同一姓名跨设备时取任一非空身份（同一人不同设备通常选同一种）
-        if not g["identity"] and row["member_identity"]:
+        if account_hit and not g["identity"] and row["member_identity"]:
             g["identity"] = str(row["member_identity"])
-        g["device_ids"].add(row["device_id"])
         created = str(row["created_at"] or "")
         if created > g["last_active"]:
             g["last_active"] = created
@@ -466,7 +655,7 @@ def api_admin_members():
             "valid_month": int(weighted) if weighted == int(weighted) else round(weighted, 2),
             "month_counts": g["month_counts"],
             "ok_total": g["ok_total"],
-            "device_count": len(g["device_ids"]),
+            "device_count": device_count.get(g["name"], 1 if g["name"] != "未署名" else 0),
             "last_active": g["last_active"],
         })
     members.sort(key=lambda m: (-m["valid_month"], -m["ok_total"], m["name"]))
