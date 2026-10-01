@@ -62,4 +62,9 @@ window.addEventListener("load", function () {
   // 预留：若以后恢复访问口令，可在此调用 apiFetch("/api/history") 验证
   // 首次访问的引导框（含月度有效条数展示，一次性弹）；已署名则不打扰
   initProfile();
+  // 页脚版本号由服务端下发（v1.17.2）：硬编码必然漂移，曾让老大误以为没更新
+  fetch("/api/health").then(r => r.json()).then(d => {
+    const el = document.getElementById("appVersion");
+    if (el && d && d.version) el.textContent = d.version;
+  }).catch(() => {});
 });

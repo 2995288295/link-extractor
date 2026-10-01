@@ -133,4 +133,32 @@ SERVICE_STARTED_AT = time.time()
 
 
 
+def _detect_version() -> str:
+    """探测当前部署的版本（git tag 优先），失败退回占位。
+
+    为什么不让前端写死版本号：v1.14.0 起页脚硬编码 "v1.14.0"，之后每次发版
+    都忘了改它，老大反复问「怎么前端还是这个版本」——实际代码早已更新。
+    现在由 /api/health 下发，页脚动态渲染，版本显示与真实部署永远一致。
+    每个进程只探测一次（import 时）。
+    """
+    try:
+        import subprocess
+        out = subprocess.run(
+            # safe.directory 必加：仓库属 root，服务以 linkext 运行，
+            # git 的「dubious ownership」检查会直接拒判 → 版本永远显示 dev。
+            ["git", "-c", "safe.directory=*", "-C", str(BASE_DIR), "describe", "--tags", "--always"],
+            capture_output=True, text=True, timeout=5,
+        )
+        tag = (out.stdout or "").strip()
+        if out.returncode == 0 and tag:
+            return tag
+    except Exception:
+        pass
+    return "dev"
+
+
+VERSION = _detect_version()
+
+
+
 ADMIN_SESSION_TTL = 8 * 60 * 60

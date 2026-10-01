@@ -27,6 +27,7 @@ export function renderDevices(devices) {
 
 /** 成员署名排行（v1.14.0）：后端已按姓名聚合排序，前端纯展示。 */
 export function renderMembers(members, dist) {
+  renderIdentityDist(dist); // 先刷新分布：空数据时也要清掉旧 chips（v1.17.2）
   const body = document.getElementById("memberBody");
   const empty = document.getElementById("memberEmpty");
   if (!body || !empty) return;
@@ -46,7 +47,6 @@ export function renderMembers(members, dist) {
       <td class="num">${fmt(m.device_count)}</td>
       <td style="color:var(--text2);font-size:12px;">${esc(m.last_active || "-")}</td>
     </tr>`).join("");
-  renderIdentityDist(dist);
 }
 
 /** 身份徽标：与用户页 .identity-btn 同一套配色（id-* 类名对齐） */

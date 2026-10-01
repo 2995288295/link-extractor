@@ -262,3 +262,18 @@ section.section-alerts { margin-bottom:16px; }
 .pool-pill.warn { background:#fff7e6; color:var(--warn); }
 .pool-pill.bad { background:#fff0f1; color:var(--error); }
 #poolStrip .pool-mini { background:rgba(255,255,255,.75); }
+
+/* ===== 成员署名（v1.14.0 起补）=====
+ * 后台 admin.css 只 import 本文件，**不**引用用户页的 components.css ——
+ * 两套设计体系（后台青色 / 用户页品牌蓝）刻意分开。故 result-badge 与
+ * identity-chip 必须在这里用后台自己的变量重新定义，否则徽标是无样式纯文本。
+ * （v1.17.2 修复：v1.14.0 加成员模块时漏了这块，「本月第一」徽标一直没样式。） */
+.result-badge { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
+.result-badge.badge-ok { background:#e6f6ef; color:var(--success); }
+.result-badge.badge-fail { background:#fdeeec; color:var(--error); }
+
+/* 身份徽标：三种身份各一套色（与用户页同色系，但用后台变量重写） */
+.identity-chip { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:600; white-space:nowrap; }
+.identity-chip.id-signed { background:var(--primary-soft); color:var(--primary); }
+.identity-chip.id-ambassador { background:#f1ebfe; color:#5b2ec4; }
+.identity-chip.id-school { background:#e6f6ef; color:#16805f; }

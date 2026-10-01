@@ -18,7 +18,7 @@ from flask import Response, jsonify, request
 from lib.extractor import extract_link
 
 from .. import app
-from ..config import SERVICE_STARTED_AT, _effective_extract_concurrency, _extract_queue, log
+from ..config import SERVICE_STARTED_AT, VERSION, _effective_extract_concurrency, _extract_queue, log
 from ..db import _get_db
 from ..outcome import _classify_outcome
 from ..ratelimit import _rate_limit_check
@@ -32,7 +32,7 @@ _HISTORY_RETENTION_PER_DEVICE = 1000
 
 @app.route("/api/health", methods=["GET"])
 def api_health():
-    return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat(), "uptime_seconds": round(time.time() - SERVICE_STARTED_AT)})
+    return jsonify({"success": True, "status": "ok", "time": datetime.now().isoformat(), "uptime_seconds": round(time.time() - SERVICE_STARTED_AT), "version": VERSION})
 
 
 
@@ -253,8 +253,11 @@ def api_extract():
                 except StopIteration:
                     pass
         # 收尾：仅在本次确实写入历史时清理该设备超限记录。
-        # 保留上限 200 → 1000（v1.13.1）：「本月有效条数」按历史统计，
+        # 保留上限 200 → 1000（v1.13.1）：「本月有效条数」按历史表统计，
         # 高产用户一个月可超 200 条，不放宽会静默少算。
+        # ⚠️ v1.17.2：只清理**本月之前**的行——曾按 id 无脑截断，单设备
+        # 超过 1000 条时会把本月记录一起删掉，导致月度有效条数静默少算
+        # （KPI 口径，错数是不能接受的）。现在 = 最新 1000 条 ∪ 本月全部。
         if record_history:
             try:
                 c = _get_db()
@@ -263,10 +266,9 @@ def api_extract():
                     (device_id, _HISTORY_RETENTION_PER_DEVICE),
                 ).fetchone()
                 if cutoff is not None:
-                    # id 单调递增：截断位及更旧的全部删除，等价于保留最新 N 条。
                     c.execute(
-                        "DELETE FROM history WHERE device_id = ? AND id <= ?",
-                        (device_id, cutoff["id"]),
+                        "DELETE FROM history WHERE device_id = ? AND id <= ? AND created_at < ?",
+                        (device_id, cutoff["id"], _month_start()),
                     )
                 c.commit()
                 c.close()
@@ -297,15 +299,23 @@ _MEMBER_IDENTITIES = {
     "school": "学校/区域创作者",
 }
 
+# members 表是否已确认存在（进程级缓存）：建表是写事务，
+# 早期每次 GET /api/profile 都跑一遍 CREATE TABLE IF NOT EXISTS + 提交，
+# 白给 SQLite 加写压力（v1.17.2 改为只确认一次）。
+_members_table_ready = False
+
 
 def _ensure_members_table() -> None:
     """成员署名表：device_id ↔ 真实姓名（+ 身份）。
 
-    延迟建表（IF NOT EXISTS 幂等，重复调用无副作用），避免改 db.py 的建表序列。
+    延迟建表（IF NOT EXISTS 幂等），避免改 db.py 的建表序列。
     姓名只是**署名标记**（无密码，可随意填），用途是后台按人聚合产量；
     同一人换设备重填即产生新映射，后台按 name 而非 device_id 聚合。
     v1.17.0 增加 identity 列：老表用 PRAGMA 探测后 ALTER 补列（幂等）。
     """
+    global _members_table_ready
+    if _members_table_ready:
+        return
     conn = _get_db()
     try:
         conn.execute(
@@ -317,6 +327,7 @@ def _ensure_members_table() -> None:
         if "identity" not in columns:
             conn.execute("ALTER TABLE members ADD COLUMN identity TEXT DEFAULT ''")
         conn.commit()
+        _members_table_ready = True
     finally:
         conn.close()
 

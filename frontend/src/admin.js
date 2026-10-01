@@ -62,4 +62,12 @@ document.addEventListener("visibilitychange", () => {
   startPolling();
   if (!content.classList.contains("hidden")) refreshCore();   // 回到前台立刻补一次
 });
+
+/* 页脚版本号由服务端下发（v1.17.2）：与用户页同源，杜绝硬编码漂移 */
+document.addEventListener("DOMContentLoaded", () => {
+  fetch("/api/health").then(r => r.json()).then(d => {
+    const el = document.getElementById("appVersion");
+    if (el && d && d.version) el.textContent = d.version;
+  }).catch(() => {});
+});
 startPolling();
