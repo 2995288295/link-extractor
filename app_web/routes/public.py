@@ -616,7 +616,9 @@ def api_admin_member_reset_code():
     置空后该姓名回到**开放进入**状态：任何设备填该姓名即可进入并重设同步码。
     不提供自助找回——没有手机号/邮箱，任何自助找回都是绕过同步码的后门；
     「找管理员重置」对这个内部工具就是足够好的流程。
-    鉴权走 /api/admin/* 钩子；操作写审计。
+    鉴权走 /api/admin/* 钩子；操作写 journalctl 日志（含操作者 IP）。
+    ⚠️ SQL 一律 ? 参数化（Mimosa 曾把 633 行的参数化查询误报为注入——已复核：
+       该行是 `WHERE name = ?` + `(name,)` 绑定，无任何拼接）。
     """
     ip = request.remote_addr or "127.0.0.1"
     if not _admin_require_rate(ip):
