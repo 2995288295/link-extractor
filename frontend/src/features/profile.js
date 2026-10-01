@@ -21,28 +21,53 @@ const IDENTITY_LABELS = {
 };
 
 export function initProfile() {
-  if (state.memberName && state.memberIdentity) return; // 信息齐全，不打扰
-  openNameModal();
+  // 是否已填全以**服务端**为准：localStorage 可能只存了姓名（v1.16.1 时代
+  // 还没有身份），只看本地会误判“齐全”而永远不弹 v1.17.0 的身份选择。
+  apiFetch("/api/profile")
+    .then((profile) => {
+      const name = (profile && profile.name) || "";
+      const identity = (profile && profile.identity) || "";
+      if (name) state.memberName = name;          // 服务端有就用服务端的
+      if (identity) state.memberIdentity = identity;
+      if (name && identity) return;               // 齐全，不打扰
+      openNameModal();
+    })
+    .catch(() => {
+      // 拉取失败（网络/限流）：退回本地判断，至少别把正常人卡在弹窗前
+      if (state.memberName && state.memberIdentity) return;
+      openNameModal();
+    });
 }
 
 export async function openNameModal() {
   const modal = document.getElementById("nameModal");
   const input = document.getElementById("memberNameInput");
   if (!modal || !input) return;
-  input.value = state.memberName || "";
-  // 已填过姓名时，标题换成「完善信息」而不是「先设置」
-  document.getElementById("nameModalTitle").textContent =
-    state.memberName ? "完善你的信息" : "先设置你的姓名";
-  // 身份回显：服务端口径优先（换设备后本地为空时）
+  // **先显示再拉数据**：此前 await 在弹窗之前，弱网/限速时会观感「点了没反应」。
+  let name = state.memberName || "";
   let identity = state.memberIdentity || "";
-  if (!identity) {
+  input.value = name;
+  paintIdentityChoices(identity);
+  document.getElementById("nameModalTitle").textContent =
+    name ? "完善你的信息" : "先设置你的姓名";
+  modal.classList.remove("hidden");
+  setTimeout(() => input.focus(), 50);
+  // 姓名与身份以服务端口径为准：换设备后本地为空、或本地只存了旧字段时，
+  // 服务端是唯一权威源（initProfile 已先拉过一次，这里兜底再拉一次）
+  if (!name || !identity) {
     try {
       const profile = await apiFetch("/api/profile");
-      identity = (profile && profile.identity) || "";
-    } catch (e) { /* 拉取失败就用本地值 */ }
+      if (!name) name = (profile && profile.name) || "";
+      if (!identity) identity = (profile && profile.identity) || "";
+      state.memberName = name;
+      state.memberIdentity = identity;
+      // 拉到了就回填（不关弹窗，用户继续编辑）
+      input.value = name;
+      paintIdentityChoices(identity);
+      document.getElementById("nameModalTitle").textContent =
+        name ? "完善你的信息" : "先设置你的姓名";
+    } catch (e) { /* 拉取失败保留本地值，静默 */ }
   }
-  state.memberIdentity = identity;
-  paintIdentityChoices(identity);
   // 月度数字异步填充（拉取失败就留空，不影响填信息）
   const slot = document.getElementById("nameMonthlySlot");
   if (slot) {
@@ -51,8 +76,6 @@ export async function openNameModal() {
       slot.innerHTML = monthlySummaryHtml(data);
     }).catch(() => {});
   }
-  modal.classList.remove("hidden");
-  setTimeout(() => input.focus(), 50);
 }
 
 function paintIdentityChoices(identity) {
