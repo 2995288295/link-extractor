@@ -3,11 +3,12 @@ import "./styles/index.css";
 import { switchTab, handleTabKey } from "./ui/tabs.js";
 import { openCoverPreview, closeCoverPreview, closeCoverPreviewOnBackdrop } from "./ui/lightbox.js";
 import { clearInput, onInputChange } from "./features/input.js";
-import { doExtract, retryLink, retryFailedLinks } from "./features/extract.js";
+import { doExtract, retryLink, retryFailedLinks, readClipboardExtract } from "./features/extract.js";
 import { copyText } from "./features/copy.js";
 import { toggleCaption } from "./features/results.js";
-import { loadHistory, clearHistory } from "./features/history.js";
+import { loadHistory, clearHistory, setHistoryFilter, onHistorySearch } from "./features/history.js";
 import { showMonthlySummary } from "./features/summary.js";
+import { initProfile, openNameModal, saveMemberName, skipMemberName } from "./features/profile.js";
 import { unescapeHtml } from "./core/dom.js";
 
 /* ------------------------------------------------------------------
@@ -23,6 +24,8 @@ Object.assign(window, {
   copyText, toggleCaption, retryLink, loadHistory, clearHistory,
   openCoverPreview, closeCoverPreview, closeCoverPreviewOnBackdrop,
   unescapeHtml,
+  readClipboardExtract, setHistoryFilter, onHistorySearch,
+  openNameModal, saveMemberName, skipMemberName,
 });
 
 // ---------- 移动端交互（C 项） ----------
@@ -60,4 +63,6 @@ window.addEventListener("load", function () {
   // 预留：若以后恢复访问口令，可在此调用 apiFetch("/api/history") 验证
   // 首页小提示：本月有效条数（失败静默，不打扰主功能）
   showMonthlySummary();
+  // 首次访问提示署名（已署名则不打扰）
+  initProfile();
 });

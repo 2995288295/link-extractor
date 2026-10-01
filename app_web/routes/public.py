@@ -22,7 +22,7 @@ from ..config import SERVICE_STARTED_AT, _effective_extract_concurrency, _extrac
 from ..db import _get_db
 from ..outcome import _classify_outcome
 from ..ratelimit import _rate_limit_check
-from ..security import _device_cookie_payload, _get_device
+from ..security import _admin_require_rate, _device_cookie_payload, _get_device
 
 # 每台设备的历史保留条数（v1.13.1 起 200 → 1000）：
 # 「本月有效条数」按历史表统计，高产用户一个月可超 200 条，保留过短会静默少算。
@@ -287,6 +287,153 @@ def api_extract():
 
 
 
+# ------------------------------------------------ 成员署名（v1.14.0 · 2026-10-01）
+
+def _ensure_members_table() -> None:
+    """成员署名表：device_id ↔ 真实姓名。
+
+    延迟建表（IF NOT EXISTS 幂等，重复调用无副作用），避免改 db.py 的建表序列。
+    姓名只是**署名标记**（无密码，可随意填），用途是后台按人聚合产量；
+    同一人换设备重填即产生新映射，后台按 name 而非 device_id 聚合。
+    """
+    conn = _get_db()
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS members ("
+            "device_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.route("/api/profile", methods=["GET"])
+def api_profile_get():
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    _ensure_members_table()
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT name FROM members WHERE device_id = ?", (device_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    resp = {"success": True, "name": (row["name"] if row else "")}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
+
+
+@app.route("/api/profile", methods=["POST"])
+def api_profile_set():
+    """登记/更新署名。无密码：姓名可冒填，定位是区分产量而非鉴权。"""
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "请输入姓名"}), 400
+    if len(name) > 20:
+        return jsonify({"success": False, "error": "姓名不能超过 20 个字"}), 400
+
+    _ensure_members_table()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _get_db()
+    try:
+        conn.execute(
+            "INSERT INTO members (device_id, name, created_at, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(device_id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at",
+            (device_id, name, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    resp = {"success": True, "name": name}
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
+
+
+@app.route("/api/admin/members", methods=["GET"])
+def api_admin_members():
+    """成员署名排行：按姓名聚合本月有效条数（去重加权）与累计成功。
+
+    ⚠️ 放在本文件而非 routes/admin.py：复用上面的月度口径常量与去重键函数，
+    避免为一条只读聚合路由跨模块拷贝口径（口径漂移过一次，别再来）。
+    未署名的设备聚合进「未署名」，产量不被漏看。鉴权走 /api/admin/* 钩子。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    _ensure_members_table()
+    month_start = _month_start()
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT h.device_id, h.original_url, h.canonical_url, h.platform, "
+            "h.status, h.created_at, m.name AS member_name "
+            "FROM history h LEFT JOIN members m ON m.device_id = h.device_id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    groups = {}
+    for row in rows:
+        name = str(row["member_name"] or "").strip() or "未署名"
+        g = groups.get(name)
+        if g is None:
+            g = groups[name] = {
+                "name": name,
+                "device_ids": set(),
+                "ok_total": 0,
+                "month_keys": set(),
+                "month_counts": {"douyin": 0, "xiaohongshu": 0, "sph": 0},
+                "last_active": "",
+            }
+        g["device_ids"].add(row["device_id"])
+        created = str(row["created_at"] or "")
+        if created > g["last_active"]:
+            g["last_active"] = created
+        if row["status"] != "success":
+            continue
+        g["ok_total"] += 1
+        if created >= month_start:
+            key = _month_canonical_key(row["canonical_url"], row["original_url"])
+            if key and key not in g["month_keys"]:
+                g["month_keys"].add(key)
+                platform_key = _MONTHLY_KEYS.get(row["platform"] or "")
+                if platform_key:
+                    g["month_counts"][platform_key] += 1
+
+    members = []
+    for g in groups.values():
+        weighted = (g["month_counts"]["douyin"] * _MONTHLY_WEIGHTS["抖音"]
+                    + g["month_counts"]["xiaohongshu"] * _MONTHLY_WEIGHTS["小红书"]
+                    + g["month_counts"]["sph"] * _MONTHLY_WEIGHTS["视频号"])
+        members.append({
+            "name": g["name"],
+            "valid_month": int(weighted) if weighted == int(weighted) else round(weighted, 2),
+            "month_counts": g["month_counts"],
+            "ok_total": g["ok_total"],
+            "device_count": len(g["device_ids"]),
+            "last_active": g["last_active"],
+        })
+    members.sort(key=lambda m: (-m["valid_month"], -m["ok_total"], m["name"]))
+    return jsonify({
+        "success": True,
+        "month": datetime.now().strftime("%Y-%m"),
+        "members": members,
+    })
+
+
+
 @app.route("/api/history", methods=["GET"])
 def api_history():
     ip = request.remote_addr or "127.0.0.1"
@@ -296,7 +443,7 @@ def api_history():
 
     conn = _get_db()
     rows = conn.execute(
-        "SELECT * FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 50", (device_id,)
+        "SELECT * FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 200", (device_id,)
     ).fetchall()
     conn.close()
     items = [dict(row) for row in rows]

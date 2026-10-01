@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="链接提取">
 <title>链接提取工具</title>
-  <script type="module" crossorigin src="/assets/index-CIgWWvnN.js"></script>
+  <script type="module" crossorigin src="/assets/index-B-yEvTha.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
   <link rel="stylesheet" crossorigin href="/assets/index-fe2Vw-cR.css">
 </head>
@@ -39,6 +39,7 @@
       <div class="link-count" id="linkCount"></div>
       <div class="toolbar">
         <button class="btn btn-primary" id="btnExtract" onclick="doExtract()">🔍 提取全部</button>
+        <button class="btn btn-ghost" id="btnClipboard" onclick="readClipboardExtract()" title="直接读取剪贴板中的链接开始提取（需 HTTPS 环境支持）">📋 读剪贴板提取</button>
         <button class="btn btn-ghost" onclick="clearInput()">清空</button>
         <button class="btn btn-ghost hidden" id="btnRetryFailed" onclick="retryFailedLinks()">🔄 重试失败项</button>
       </div>
@@ -49,6 +50,7 @@
 
   <!-- 统计页 -->
   <div id="tab-stats" class="hidden" role="tabpanel" aria-labelledby="tab-button-stats">
+    <div class="card" id="monthlyCard" style="margin-bottom:16px;"><div style="color:var(--text2);font-size:13px;">本月统计加载中…</div></div>
     <div class="stats-grid" id="statsGrid"></div>
     <div class="card" style="margin-top:16px;">
       <h2>近 7 天提取趋势</h2>
@@ -63,6 +65,15 @@
         <button class="btn btn-ghost" onclick="loadHistory()">🔄 刷新</button>
         <button class="btn btn-danger" id="btnClearHistory" onclick="clearHistory()">🗑 清空历史</button>
       </div>
+      <div class="history-filter" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <div id="historyPlatformChips" style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-sm btn-primary" data-platform="all" onclick="setHistoryFilter('all')">全部</button>
+          <button class="btn btn-sm btn-ghost" data-platform="抖音" onclick="setHistoryFilter('抖音')">抖音</button>
+          <button class="btn btn-sm btn-ghost" data-platform="小红书" onclick="setHistoryFilter('小红书')">小红书</button>
+          <button class="btn btn-sm btn-ghost" data-platform="视频号" onclick="setHistoryFilter('视频号')">视频号</button>
+        </div>
+        <input id="historySearch" type="search" placeholder="搜索链接 / 文案 / 标题" aria-label="搜索历史" style="flex:1;min-width:160px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;" oninput="onHistorySearch(this)">
+      </div>
       <div class="status" id="historyStatus" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="historyList"></div>
@@ -70,11 +81,22 @@
 
   <footer>
     <div class="footer-note">本工具仅用于个人内容整理 · 请勿高频抓取 · 使用前请核对提取结果</div>
-    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.13.1</div>
+    <div class="footer-author">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.14.0</div>
   </footer>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<div class="cover-preview hidden" id="nameModal" role="dialog" aria-modal="true" aria-label="设置姓名">
+  <div class="preview-dialog" style="max-width:360px;padding:22px;">
+    <h2 style="margin:0 0 6px;font-size:18px;">设置你的姓名</h2>
+    <p style="margin:0 0 14px;color:var(--text2);font-size:13px;line-height:1.6;">用于后台统计「谁提取得多」，请填写真实姓名。仅作署名用途，不需要密码，可随时修改。</p>
+    <input id="memberNameInput" type="text" maxlength="20" placeholder="请输入真实姓名（如：张三）" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:15px;box-sizing:border-box;" onkeydown="if(event.key==='Enter')saveMemberName()">
+    <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+      <button class="btn btn-ghost" onclick="skipMemberName()">暂不设置</button>
+      <button class="btn btn-primary" onclick="saveMemberName()">保存</button>
+    </div>
+  </div>
+</div>
 <div class="cover-preview hidden" id="coverPreview" role="dialog" aria-modal="true" aria-labelledby="coverPreviewTitle" onclick="closeCoverPreviewOnBackdrop(event)">
   <div class="preview-dialog">
     <button class="preview-close" id="coverPreviewClose" type="button" onclick="closeCoverPreview()" aria-label="关闭封面预览">×</button>

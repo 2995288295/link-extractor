@@ -25,6 +25,28 @@ export function renderDevices(devices) {
   more.textContent = expanded.devices ? "收起设备列表" : `展开全部设备（${filtered.length}）`;
 }
 
+/** 成员署名排行（v1.14.0）：后端已按姓名聚合排序，前端纯展示。 */
+export function renderMembers(members) {
+  const body = document.getElementById("memberBody");
+  const empty = document.getElementById("memberEmpty");
+  if (!body || !empty) return;
+  if (!members || !members.length) {
+    body.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  body.innerHTML = members.map((m, i) => `
+    <tr>
+      <td><b>${esc(m.name)}</b>${i === 0 && members.length > 1 && m.valid_month > 0 ? ' <span class="result-badge badge-ok">本月第一</span>' : ""}</td>
+      <td class="num"><b>${fmt(m.valid_month)}</b></td>
+      <td class="num" style="color:var(--text2);font-size:12px;">${fmt(m.month_counts?.douyin || 0)} / ${fmt(m.month_counts?.xiaohongshu || 0)} / ${fmt(m.month_counts?.sph || 0)}</td>
+      <td class="num">${fmt(m.ok_total)}</td>
+      <td class="num">${fmt(m.device_count)}</td>
+      <td style="color:var(--text2);font-size:12px;">${esc(m.last_active || "-")}</td>
+    </tr>`).join("");
+}
+
 // 细粒度归因的中文说明：看板不再只显示「平台暂时限制」这句万能文案，
 // 而是直接摊开真实根因（限流 / 内容没了 / 页面结构变了 / 用户输入问题）。
 const KIND_LABELS = {
@@ -92,7 +114,7 @@ export function errorAction(error, kind) {
 export function renderRecent(items) {
   const el = document.getElementById("recentList");
   if (!items || !items.length) { el.innerHTML = '<div class="empty">暂无动态</div>'; return; }
-  const nameMap = { douyin: "抖音", xiaohongshu: "小红书" };
+  const nameMap = { douyin: "抖音", xiaohongshu: "小红书", sph: "视频号" };
   const platform = document.getElementById("recentPlatform").value;
   const status = document.getElementById("recentStatus").value;
   const filtered = items.filter(it => (platform === "all" || it.platform === platform) && (status === "all" || it.status === status));

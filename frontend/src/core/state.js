@@ -14,6 +14,9 @@ export const state = {
   deviceId: localStorage.getItem("device_id") || "",
   deviceSig: localStorage.getItem("device_sig") || "",
 
+  /* 成员署名（v1.14.0）：真实姓名，localStorage 持久化；服务端另有 members 表 */
+  memberName: localStorage.getItem("member_name") || "",
+
   /* 提取结果与并发闸 */
   latestResults: [], // 最近一次提取的全部结果（供「重试失败项」用）
   extractingNow: false, // 提取中防重复

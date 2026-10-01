@@ -156,6 +156,29 @@ export async function extractOneStream(url) {
   return result;
 }
 
+/** 读取剪贴板并直接提取（v1.14.0）。
+ *  ⚠️ clipboard.readText 仅在 HTTPS/localhost 可用；本工具目前是 HTTP，
+ *  大多数环境下会走 catch 分支提示用户手动粘贴。上了 HTTPS 后自动生效。 */
+export async function readClipboardExtract() {
+  const ta = document.getElementById("inputUrls");
+  try {
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+      throw new Error("unsupported");
+    }
+    const text = await navigator.clipboard.readText();
+    const urls = extractUrls(text || "");
+    if (!urls.length) {
+      showToast("剪贴板里没有识别到链接");
+      return;
+    }
+    ta.value = text.trim();
+    updateLinkCount();
+    await doExtract();
+  } catch (e) {
+    showToast("无法自动读取剪贴板（需要 HTTPS 环境），请长按输入框粘贴");
+  }
+}
+
 /** 重试单条失败链接：重新提取并替换该卡片 */
 export async function retryLink(btn, index) {
   const card = btn.closest(".result-item");

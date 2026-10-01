@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>运营看板 · 链接提取工具</title>
-  <script type="module" crossorigin src="/assets/admin-3iqu8Te0.js"></script>
+  <script type="module" crossorigin src="/assets/admin-ZHyBxQGz.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-P2Xu9kJm.js">
   <link rel="stylesheet" crossorigin href="/assets/admin-D6lOd26g.css">
 </head>
@@ -81,6 +81,18 @@
       </div>
     </div>
 
+    <div class="card dashboard-module full" data-module="members" data-title="成员署名排行"><div class="module-head"><span class="drag-handle">⠿</span><b>成员署名排行</b><span class="module-actions"></span></div>
+      <h2>成员署名排行</h2>
+      <p class="updated" style="margin:0 0 8px;">按姓名聚合 · 本月有效 = 去重后加权（抖音 1 / 小红书 0.5 / 视频号 0.5）· 分平台列顺序：抖音 / 小红书 / 视频号 · 未署名设备计入「未署名」</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>成员</th><th class="num">本月有效</th><th class="num">本月分平台</th><th class="num">累计成功</th><th class="num">设备数</th><th>最近活跃</th></tr></thead>
+          <tbody id="memberBody"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div id="memberEmpty" class="empty hidden">暂无成员数据</div>
+    </div>
+
     <div class="card dashboard-module full" data-module="devices" data-title="设备使用排行"><div class="module-head"><span class="drag-handle">⠿</span><b>设备使用排行</b><span class="module-actions"></span></div>
       <h2>设备使用排行</h2>
       <div class="section-tools">
@@ -106,7 +118,7 @@
       </div>
       <div class="card">
         <h2>最近动态（脱敏）</h2>
-        <div class="section-tools"><select id="recentPlatform" aria-label="平台筛选"><option value="all">全部平台</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option></select><select id="recentStatus" aria-label="状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="error">失败</option></select></div>
+        <div class="section-tools"><select id="recentPlatform" aria-label="平台筛选"><option value="all">全部平台</option><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="sph">视频号</option></select><select id="recentStatus" aria-label="状态筛选"><option value="all">全部状态</option><option value="success">成功</option><option value="error">失败</option></select></div>
         <div id="recentList" class="list-collapsed"></div>
         <div class="more-row"><button id="recentMore" type="button">展开全部动态</button></div>
       </div>
@@ -173,8 +185,8 @@
         <div class="pool-form-grid">
           <label class="pool-check"><input id="peEnabled" type="checkbox"> 启用（停用后不参与兜底）</label>
           <label>每日额度（秒）<input id="peDaily" type="number"></label>
-          <label>预留（秒）<input id="peReserve" type="number"></label>
-          <label>备注<input id="peNote"></label>
+          <label>预留（秒，留给签到）<input id="peReserve" type="number"></label>
+          <label>备注<input id="pcNote"></label>
           <label>重置密码（留空不改）<input id="pePassword" type="password"></label>
         </div>
         <div class="pool-form-actions">
@@ -187,7 +199,7 @@
     </div>
   </div>
 
-  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.11.0</div>
+  <div class="footer">作者：黄徽徽 · 联系方式：H15217830799 · 项目：链接提取工具 v1.14.0</div>
 </div>
 
 <div id="loginOverlay">

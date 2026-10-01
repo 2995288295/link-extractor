@@ -1,16 +1,47 @@
 import { apiFetch } from "../core/api.js";
 import { esc } from "../core/dom.js";
+import { state } from "../core/state.js";
 
 // ---------------------------------------------------------------- 统计
 
 export async function loadStats() {
   try {
-    const data = await apiFetch("/api/stats");
+    const [data, monthly, profile] = await Promise.all([
+      apiFetch("/api/stats"),
+      apiFetch("/api/monthly-summary").catch(() => null),
+      apiFetch("/api/profile").catch(() => null),
+    ]);
     renderStats(data);
+    renderMonthlyCard(monthly, profile);
   } catch (e) {
     document.getElementById("statsGrid").innerHTML =
       '<div class="card" style="color:var(--error);text-align:center;">统计加载失败</div>';
   }
+}
+
+/** 本月有效条数常驻卡片（v1.14.0）：与首页弹窗同口径，长期可见 */
+function renderMonthlyCard(monthly, profile) {
+  const el = document.getElementById("monthlyCard");
+  if (!el) return;
+  if (!monthly || !monthly.success) {
+    el.innerHTML = '<div style="color:var(--text2);font-size:13px;">本月统计暂时不可用</div>';
+    return;
+  }
+  const c = monthly.counts || {};
+  const serverName = (profile && profile.name) || "";
+  const name = serverName || state.memberName || "";
+  const nameHtml = name
+    ? `<span style="font-weight:600;">${esc(name)}</span> <button class="btn btn-sm btn-ghost" onclick="openNameModal()">改名</button>`
+    : `<button class="btn btn-sm btn-primary" onclick="openNameModal()">设置姓名（用于后台统计）</button>`;
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <h2 style="margin:0;">本月有效条数：<span style="color:var(--primary);font-size:24px;">${monthly.valid_count}</span> 条</h2>
+      <div>${nameHtml}</div>
+    </div>
+    <div style="color:var(--text2);font-size:13px;margin-top:8px;">
+      抖音 ${c.douyin || 0} · 小红书 ${c.xiaohongshu || 0} · 视频号 ${c.sph || 0}（同一内容已去重）
+      ｜ 计法：抖音 1 条 · 小红书 0.5 条 · 视频号 0.5 条
+    </div>`;
 }
 
 export function renderStats(s) {
