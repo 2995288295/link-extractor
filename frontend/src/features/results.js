@@ -24,19 +24,26 @@ export function resultCardHtml(r, i) {
     ? '<span class="platform-tag platform-douyin">抖音</span>'
     : r.platform_raw === "xiaohongshu"
       ? '<span class="platform-tag platform-xiaohongshu">小红书</span>'
-      : "";
+      : r.platform_raw === "sph"
+        ? '<span class="platform-tag platform-sph">视频号</span>'
+        : "";
 
   const badge = r.success
     ? (r.partial
       ? '<span class="result-badge badge-ok">✓ 已转换</span>'
       : '<span class="result-badge badge-ok">✓ 成功</span>')
     : '<span class="result-badge badge-fail">✗ 失败</span>';
+  // 本月重复提报警示：同一内容本月已成功提报过（服务端按规范链接去重判定）
+  const dupBadge = r.success && r.duplicate_this_month
+    ? '<span class="result-badge badge-dup" title="该内容本月已提报过，重复提交不会增加有效条数">⚠ 本月已提报</span>'
+    : "";
 
   let html = `
     <div class="result-head">
       <span class="result-index">#${i + 1}</span>
       ${platformTag}
       ${badge}
+      ${dupBadge}
     </div>`;
 
   if (r.success) {

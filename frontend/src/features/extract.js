@@ -8,7 +8,7 @@ export async function doExtract(isAuto = false) {
   const raw = document.getElementById("inputUrls").value;
   const urls = extractUrls(raw);
   if (!urls.length) {
-    if (!isAuto) showToast("未识别到链接，请粘贴抖音或小红书分享链接");
+    if (!isAuto) showToast("未识别到链接，请粘贴抖音、小红书或视频号的分享链接");
     return;
   }
   if (urls.length > 20) {
@@ -32,6 +32,7 @@ export async function doExtract(isAuto = false) {
 
   let okCount = 0;
   let failCount = 0;
+  let dupCount = 0;
 
   try {
     let res = await fetch("/api/extract", {
@@ -76,6 +77,7 @@ export async function doExtract(isAuto = false) {
           state.latestResults.push(r);
           appended++;
           if (r.success) okCount++; else failCount++;
+          if (r.success && r.duplicate_this_month) dupCount++;
           const item = document.createElement("div");
           item.className = "result-item";
           item.dataset.sourceIndex = String(r.source_index);
@@ -86,7 +88,10 @@ export async function doExtract(isAuto = false) {
           initCaptionToggles(item);
           status.textContent = `正在提取...（完成 ${appended}/${urls.length}，成功 ${okCount}，失败 ${failCount}）`;
         } else if (msg.type === "end") {
-          // 结束帧
+          // 结束帧：有重复提报时统一提醒一次（卡片上另有逐条标记）
+          if (dupCount > 0) {
+            showToast(`本月已提报过 ${dupCount} 条，重复提交不增加有效条数`);
+          }
         }
       }
     }

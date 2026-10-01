@@ -88,6 +88,15 @@ class ContentExpiredError(ExtractError):
     kind = "expired_content"
 
 
+class NoteDeletedError(ContentExpiredError):
+    """平台**实证**内容不存在：笔记页 404 / 页面明确提示已删除或设为私密。
+
+    与普通 ContentExpiredError（抖音 filter 还混着「审核中」等可恢复态）
+    的区别：只有本类才允许登记死链缓存（v1.13.1 起死链登记改实证制，
+    限流失败绝不计入——2026-10-01 复盘发现活链被错标 24h）。
+    """
+
+
 class PlatformLimitedError(ExtractError):
     """平台风控：登录页 / 验证页。窗口式软限流，换出口 IP 可解。"""
 
@@ -803,50 +812,46 @@ def _resolve_short_link(url: str) -> str:
         extra = _shortlink_extra_shot(platform, url, candidates)
         if extra:
             return extra
-    # 全部失败：记入死链候选（24h 内跨 30min 连败 >=5 次 → 后续直接秒回）。
-    _note_dead_link(url)
+    # 全部失败：只抛限流错误。⚠️ 这里**不能**记死链（v1.13.1 修正）：
+    # v1.12.0 曾把短链限流失败计入死链连败（这里是唯一计数入口），晚间
+    # 高峰把活链错标 24h——复盘实证：同一 URL 被标后次日成功提取，且用户
+    # 重贴被缓存直接挡掉。死链登记只认平台实证，见 _mark_dead_link。
     raise ShortLinkBlockedError(_XHS_LIMITED_MESSAGE)
 
 
-# ------------------------------------------------- 死链识别（2026-09-27 v1.12.0）
+# ------------------------------------------- 死链识别（v1.12.0 引入，v1.13.1 改实证制）
 
 _DEAD_LINK_TTL = float(os.environ.get("DEAD_LINK_TTL_SECONDS", "86400"))
-_DEAD_LINK_MIN_FAILS = int(os.environ.get("DEAD_LINK_MIN_FAILS", "5"))
-_DEAD_LINK_MIN_SPAN = float(os.environ.get("DEAD_LINK_MIN_SPAN_SECONDS", "1800"))
 _dead_links: dict = {}
 _dead_link_lock = threading.Lock()
 
 
-def _note_dead_link(url: str) -> None:
-    """记录一次短链限流失败，用于死链识别。
+def _mark_dead_link(url: str) -> None:
+    """登记一条**实证**死链：24h 内同链不再打平台，直接秒回。
 
-    判据刻意保守：24h 内连败 >=5 次 **且** 首败距今 >=30 分钟才认定疑似死链——
-    夜间高峰失败率 70%+，30 分钟内的突发连败属正常限流，不能标。
-    进程内记忆，重启即清零重新计数（无持久化成本）。
+    登记入口只有 NoteDeletedError（笔记页 404、页面明确提示已删除/设为
+    私密）。限流、审核中等一切可恢复失败一律不记；24h 后自动过期，
+    重新提交会真打一次平台复核。进程内记忆，重启即清零。
     """
     now = time.monotonic()
     with _dead_link_lock:
-        entry = _dead_links.get(url)
-        if entry is None or now - entry[0] > _DEAD_LINK_TTL:
-            _dead_links[url] = [now, 1]
-        else:
-            entry[1] += 1
         if len(_dead_links) > 1000:  # 粗暴防膨胀：删最老一半
-            for k in sorted(_dead_links, key=lambda k: _dead_links[k][0])[:500]:
+            for k in sorted(_dead_links, key=_dead_links.get)[:500]:
                 del _dead_links[k]
+        _dead_links[url] = now
 
 
 def _is_dead_link(url: str) -> bool:
-    """疑似死链（24h 内跨 30min 连败 >=5 次）→ 打平台前直接秒回。"""
+    """实证死链（24h 内）→ 打平台前直接秒回。"""
     now = time.monotonic()
     with _dead_link_lock:
-        entry = _dead_links.get(url)
-        if not entry:
+        ts = _dead_links.get(url)
+        if ts is None:
             return False
-        if now - entry[0] > _DEAD_LINK_TTL:
+        if now - ts > _DEAD_LINK_TTL:
             del _dead_links[url]
             return False
-        return entry[1] >= _DEAD_LINK_MIN_FAILS and now - entry[0] >= _DEAD_LINK_MIN_SPAN
+        return True
 
 
 # ------------------------------------------------- 短链补一枪（2026-09-27 v1.12.0）
@@ -1373,6 +1378,9 @@ def _extract_xhs_initial_state(
     """小红书提取：__INITIAL_STATE__ 页面状态解析（信息最全）。"""
     source_url = _extract_first_url(url)
     response, final_url = _fetch_xhs_note_page(source_url, session, timeout=30)
+    if response.status_code == 404:
+        # 平台实证：笔记页 404 = 内容不存在（已删除/链接失效），允许登记死链。
+        raise NoteDeletedError("该笔记已删除或暂不可见")
     response.raise_for_status()
 
     html = response.text
@@ -1398,7 +1406,8 @@ def _extract_xhs_initial_state(
         # 容器为空，则是平台没给这条笔记（已删除 / 仅自己可见）。
         if structure_broken:
             raise PageStructureError("暂时无法获取该笔记内容")
-        raise ContentExpiredError("该笔记已删除或设为私密")
+        # 平台实证：容器为空 = 平台没给这条笔记（已删除 / 仅自己可见）。
+        raise NoteDeletedError("该笔记已删除或设为私密")
 
     note_id = note.get("noteId") or ""
     if not note_id:
@@ -2224,9 +2233,11 @@ def extract_link(raw: str) -> ExtractResult:
         # 避免短链被解析成 douyin.com/video/xxx 后再被 _extract_douyin 重复请求一次
         is_xhs = "xiaohongshu" in url or "xhslink" in url
         is_sph = "weixin.qq.com" in url.lower()
-        # 死链秒回：24h 内跨 30min 连败 >=5 次的链接不再打平台（误差代价=用户
-        # 从 App 重新复制即可绕过；收益=止损 33 连败这类炮灰请求）。
-        if is_xhs and _is_dead_link(url):
+        # 作品 ID 预提取（纯本地正则）：死链门与后面的缓存键都要用。
+        post_id = _extract_post_id_from_url(url)
+        # 死链秒回：平台**实证**内容不存在的链接 24h 内不再打平台。
+        # 原始链接与作品 ID 双键核对（同一作品换分享形式重贴也能命中）。
+        if _is_dead_link(url) or (post_id and _is_dead_link(post_id)):
             logger.info("死链秒回（不打平台）: %s", url[:60])
             return ExtractResult(
                 success=False,
@@ -2349,6 +2360,12 @@ def extract_link(raw: str) -> ExtractResult:
     except Exception as e:
         # 归因按**异常类型**走（error_kind_of），不再对报错文案做关键词匹配。
         kind = error_kind_of(e)
+        # 实证死链登记：只有 NoteDeletedError（平台明示内容不存在）才记，
+        # 同时登记原始链接与作品 ID 两个键，换分享形式重贴也能命中。
+        if isinstance(e, NoteDeletedError):
+            _mark_dead_link(url)
+            if post_id:
+                _mark_dead_link(post_id)
         # 只信我们自己定义的业务异常（ExtractError 及其子类）能带用户文案。
         # 此前这里是 (ValueError, RuntimeError) —— 任何库抛的 ValueError 都会被原样透传
         # （典型：json.JSONDecodeError → 用户看到 "Expecting value: line 1 column 1 (char 0)"）。

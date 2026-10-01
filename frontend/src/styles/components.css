@@ -294,3 +294,33 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   position: absolute; top: 10px; right: 10px; width: 40px; height: 40px; border: 0;
   border-radius: 50%; background: rgba(10, 13, 18, .80); color: #fff; font-size: 22px; cursor: pointer;
 }
+
+/* ===== 视频号平台标 + 重复提报警示 + 本月有效条数弹窗（v1.13.1） ===== */
+/* 平台识别色与品牌体系无关，保留原色系（同 §4.3 约定） */
+.platform-sph { background: #E8F8EE; color: #07A254; }
+
+/* 重复提报警示：warn 语义色（浅底 + 描边） */
+.result-badge.badge-dup { background: var(--warn-soft); color: var(--warn-ink); border: 1px solid var(--warn-border); }
+
+/* 本月有效条数小提示（首页加载时弹出，10s 自动收起） */
+.monthly-tip {
+  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 1200; width: min(420px, calc(100vw - 24px));
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md, 12px); box-shadow: 0 8px 24px rgba(10, 13, 18, .12);
+  padding: 12px 36px 12px 14px; font-size: var(--fs-sm, 13px); line-height: 1.6;
+  animation: monthly-tip-in .25s ease;
+}
+.monthly-tip.leaving { opacity: 0; transition: opacity .3s ease; }
+.monthly-tip-title { font-size: var(--fs-md, 14px); color: var(--ink); }
+.monthly-tip-title strong { font-size: 18px; color: var(--brand, #1769E0); }
+.monthly-tip-detail { color: var(--ink-2, #5B6472); }
+.monthly-tip-rule { color: var(--ink-3, #98A1B0); font-size: var(--fs-xs, 12px); }
+.monthly-tip-close {
+  position: absolute; top: 6px; right: 8px; border: none; background: none;
+  font-size: 18px; color: var(--ink-3, #98A1B0); cursor: pointer; padding: 2px 6px;
+}
+@keyframes monthly-tip-in {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}

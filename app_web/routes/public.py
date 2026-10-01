@@ -24,6 +24,10 @@ from ..outcome import _classify_outcome
 from ..ratelimit import _rate_limit_check
 from ..security import _device_cookie_payload, _get_device
 
+# 每台设备的历史保留条数（v1.13.1 起 200 → 1000）：
+# 「本月有效条数」按历史表统计，高产用户一个月可超 200 条，保留过短会静默少算。
+_HISTORY_RETENTION_PER_DEVICE = 1000
+
 
 
 @app.route("/api/health", methods=["GET"])
@@ -197,6 +201,9 @@ def api_extract():
     def _stream():
         """并发提取，每条完成立即 yield（ndjson），前端逐条渲染。"""
         batch_started_at = time.monotonic()
+        # 本月已提报集合（成功记录的规范链接，去 query 串）：给每条结果打
+        # 「重复提报」标记用，本批次内刚提报过的也会命中。
+        month_keys = _load_month_canonical_keys(device_id)
         # 先发头帧（携带设备标识，前端保存）
         payload = {"type": "start", "total": len(urls)}
         payload.update(_device_cookie_payload(device_id, device_sig))
@@ -225,7 +232,15 @@ def api_extract():
                         "post_id": "", "error": "提取失败，请稍后重试", "hint": "",
                         "partial": False, "error_kind": "internal_error",
                         "outcome_class": "internal_error",
+                        "duplicate_this_month": False,
                     }
+                # 重复提报标记：先比对再登记，同批次第二条同链也会被标。
+                if item.get("success") and item.get("canonical_url"):
+                    dup_key = str(item["canonical_url"]).split("?", 1)[0]
+                    item["duplicate_this_month"] = dup_key in month_keys
+                    month_keys.add(dup_key)
+                else:
+                    item["duplicate_this_month"] = False
                 done += 1
                 success_count += int(item["success"])
                 yield json.dumps(
@@ -238,17 +253,21 @@ def api_extract():
                 except StopIteration:
                     pass
         # 收尾：仅在本次确实写入历史时清理该设备超限记录。
+        # 保留上限 200 → 1000（v1.13.1）：「本月有效条数」按历史统计，
+        # 高产用户一个月可超 200 条，不放宽会静默少算。
         if record_history:
             try:
                 c = _get_db()
-                c.execute(
-                    """
-                    DELETE FROM history WHERE device_id = ? AND id NOT IN (
-                        SELECT id FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 200
+                cutoff = c.execute(
+                    "SELECT id FROM history WHERE device_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?",
+                    (device_id, _HISTORY_RETENTION_PER_DEVICE),
+                ).fetchone()
+                if cutoff is not None:
+                    # id 单调递增：截断位及更旧的全部删除，等价于保留最新 N 条。
+                    c.execute(
+                        "DELETE FROM history WHERE device_id = ? AND id <= ?",
+                        (device_id, cutoff["id"]),
                     )
-                    """,
-                    (device_id, device_id),
-                )
                 c.commit()
                 c.close()
             except Exception:
@@ -352,6 +371,89 @@ def api_stats():
         "success_rate": round(ok_count / total * 100, 1) if total else 0,
         "platform_dist": platform_dist,
         "trend": trend,
+    }
+    resp.update(_device_cookie_payload(device_id, device_sig))
+    return jsonify(resp)
+
+
+# ------------------------------------------------ 本月有效条数（v1.13.1 · 2026-10-01）
+
+# 计数权重（2026-10-01 口径）：抖音 1 条，小红书 / 视频号各 0.5 条。
+# 「有效」= 该设备本月成功提取的记录，按规范链接去重（同一笔记/作品无论
+# 用哪种分享形式粘贴，本月只计 1 次）；文案待补（partial）也算有效。
+_MONTHLY_WEIGHTS = {"抖音": 1.0, "小红书": 0.5, "视频号": 0.5}
+_MONTHLY_KEYS = {"抖音": "douyin", "小红书": "xiaohongshu", "视频号": "sph"}
+
+
+def _month_start() -> str:
+    return datetime.now().strftime("%Y-%m-01 00:00:00")
+
+
+def _month_canonical_key(canonical_url: str, original_url: str) -> str:
+    """去重键：规范链接去掉 query 串；规范链接缺失时退回原始链接。"""
+    return str(canonical_url or original_url or "").split("?", 1)[0]
+
+
+def _load_month_canonical_keys(device_id: str) -> set:
+    """本月该设备成功记录的规范链接集合（去 query 串）。"""
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT canonical_url, original_url FROM history "
+            "WHERE device_id = ? AND status = 'success' AND created_at >= ?",
+            (device_id, _month_start()),
+        ).fetchall()
+    finally:
+        conn.close()
+    keys = set()
+    for row in rows:
+        key = _month_canonical_key(row["canonical_url"], row["original_url"])
+        if key:
+            keys.add(key)
+    return keys
+
+
+@app.route("/api/monthly-summary", methods=["GET"])
+def api_monthly_summary():
+    """本月有效条数（按设备隔离）：去重后加权，抖音 1 / 小红书 0.5 / 视频号 0.5。"""
+    ip = request.remote_addr or "127.0.0.1"
+    device_id, device_sig, device_valid = _get_device(request)
+    if not _rate_limit_check(ip, device_id if device_valid else ""):
+        return jsonify({"success": False, "error": "请求过于频繁，请稍后再试"}), 429
+
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            "SELECT canonical_url, original_url, platform FROM history "
+            "WHERE device_id = ? AND status = 'success' AND created_at >= ?",
+            (device_id, _month_start()),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    seen = set()
+    counts = {"douyin": 0, "xiaohongshu": 0, "sph": 0}
+    for row in rows:
+        key = _month_canonical_key(row["canonical_url"], row["original_url"])
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        platform_key = _MONTHLY_KEYS.get(row["platform"] or "")
+        if platform_key:
+            counts[platform_key] += 1
+
+    weighted = sum(
+        counts[key] * weight for key, weight in (
+            (_MONTHLY_KEYS[label], _MONTHLY_WEIGHTS[label]) for label in _MONTHLY_KEYS
+        )
+    )
+    valid_count = int(weighted) if weighted == int(weighted) else round(weighted, 2)
+    resp = {
+        "success": True,
+        "month": datetime.now().strftime("%Y-%m"),
+        "counts": counts,
+        "unique_count": len(seen),
+        "valid_count": valid_count,
     }
     resp.update(_device_cookie_payload(device_id, device_sig))
     return jsonify(resp)

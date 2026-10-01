@@ -7,6 +7,7 @@ import { doExtract, retryLink, retryFailedLinks } from "./features/extract.js";
 import { copyText } from "./features/copy.js";
 import { toggleCaption } from "./features/results.js";
 import { loadHistory, clearHistory } from "./features/history.js";
+import { showMonthlySummary } from "./features/summary.js";
 import { unescapeHtml } from "./core/dom.js";
 
 /* ------------------------------------------------------------------
@@ -57,4 +58,6 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
 // 口令模块已隐藏（服务端未启用 ACCESS_TOKEN 时不校验），打开即用
 window.addEventListener("load", function () {
   // 预留：若以后恢复访问口令，可在此调用 apiFetch("/api/history") 验证
+  // 首页小提示：本月有效条数（失败静默，不打扰主功能）
+  showMonthlySummary();
 });
