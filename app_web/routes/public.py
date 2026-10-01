@@ -439,13 +439,18 @@ def _migrate_to_accounts() -> None:
 
 @app.route("/api/session", methods=["POST"])
 def api_session():
-    """登录 / 注册 / 认领（v1.18.0）：姓名 + 4 位 PIN，三种情况一个入口。
+    """进入 / 注册（v1.18.1）：姓名 + **同步码（选填）** + 身份。
 
-      - 姓名不存在           → 注册（必须选身份），本次 PIN 成为账号 PIN
-      - 姓名存在、PIN 为空    → 老成员首次认领，设置自己的 PIN
-      - 姓名存在、PIN 不匹配  → 403（不区分「姓名错」与「PIN 错」，防枚举）
-    成功后以**姓名**作为 device_id 签发（HMAC 签名），历史/统计自动按人隔离，
-    换设备登录同一姓名即合并——下游所有查询一行都不用改。
+    同步码不是密码，是「多设备同步」用的归属声明（老大 v1.18.1 定：选填、
+    改名同步码，避免做成密码系统）。规则：
+
+      - 当前设备已是该成员的凭证        → 直接进；填了同步码视为**改码**（免旧码，
+                                          登录状态本身就是身份证明）
+      - 姓名不存在                     → 以该姓名进入；填了码即设为该姓名的码
+      - 姓名存在、**未设码**            → 直接进入（该姓名当前对任何人开放）；
+                                          填了码即趁机设上
+      - 姓名存在、**已设码**            → 必须填对码才能进入（这就是「保护」的开关）
+    忘记码 → 找管理员重置（置空后该姓名回到开放状态，成员重设即可）。
     """
     ip = request.remote_addr or "127.0.0.1"
     # 当前设备标识（此时可能还是匿名 UUID）：用于把本设备登记到成员名下
@@ -455,18 +460,17 @@ def api_session():
 
     payload = request.get_json(silent=True) or {}
     name = str(payload.get("name") or "").strip()
-    pin = str(payload.get("pin") or "").strip()
+    code = str(payload.get("code") or payload.get("pin") or "").strip()  # 兼容旧字段名 pin
     identity = str(payload.get("identity") or "").strip()
     if not name:
         return jsonify({"success": False, "error": "请输入姓名"}), 400
     if len(name) > 20:
         return jsonify({"success": False, "error": "姓名不能超过 20 个字"}), 400
-    if not re.fullmatch(r"\d{4}", pin):
-        return jsonify({"success": False, "error": "PIN 需为 4 位数字"}), 400
+    if code and not re.fullmatch(r"\d{4}", code):
+        return jsonify({"success": False, "error": "同步码需为 4 位数字"}), 400
     if identity and identity not in _MEMBER_IDENTITIES:
         return jsonify({"success": False, "error": "身份选择有误，请重新选择"}), 400
-    # PIN 爆破防护：按姓名限速（每分钟 5 次）。4 位 PIN 只有 1 万种组合，
-    # 不限速等于没设防——这是「姓名 + PIN」方案成立的前提。
+    # 试码防护：按姓名限速（每分钟 5 次）。4 位码只有 1 万组合，不限速等于没设防。
     if not _check_rate_limit(f"member-login:{name}", 5):
         return jsonify({"success": False, "error": "尝试次数过多，请 1 分钟后再试"}), 429
 
@@ -479,20 +483,38 @@ def api_session():
         ).fetchone()
         final_identity = (row["identity"] if row else "") or ""
         new_key = ""  # 新建账号时先拿住 key，签发要用（row 为 None 时读不到）
-        if row is None:
-            if not identity:
-                return jsonify({"success": False, "error": "请选择身份"}), 400
+        # 当前设备凭证是否已指向这个成员（已登录 → 改码免旧码）
+        already = conn.execute(
+            "SELECT 1 FROM member_accounts WHERE member_key = ? AND name = ?", (cur_device, name)
+        ).fetchone()
+        if already and row is not None:
+            # 已登录且操作自己的账号：只做「改码 / 改身份」
+            if code:
+                conn.execute(
+                    "UPDATE member_accounts SET pin_hash = ?, updated_at = ? WHERE name = ?",
+                    (_hash_pin(code), now, name),
+                )
+            if identity and identity != final_identity:
+                conn.execute(
+                    "UPDATE member_accounts SET identity = ?, updated_at = ? WHERE name = ?",
+                    (identity, now, name),
+                )
+                final_identity = identity
+        elif row is None:
+            # 新姓名：直接以该姓名进入；填了码即设为该姓名的码
             new_key = _new_member_key()
             conn.execute(
                 "INSERT INTO member_accounts (name, member_key, pin_hash, identity, created_at, updated_at) "
                 "VALUES (?,?,?,?,?,?)",
-                (name, new_key, _hash_pin(pin), identity, now, now),
+                (name, new_key, _hash_pin(code) if code else "", identity, now, now),
             )
             final_identity = identity
         elif row["pin_hash"]:
-            if not hmac.compare_digest(row["pin_hash"], _hash_pin(pin)):
-                return jsonify({"success": False, "error": "姓名或 PIN 不正确"}), 403
-            # 登录成功：允许顺手改身份（下次登录仍生效）
+            # 已设码：必须填对（填空 = 没填码，进不去）
+            if not code:
+                return jsonify({"success": False, "error": "该姓名已设置同步码，请输入同步码"}), 403
+            if not hmac.compare_digest(row["pin_hash"], _hash_pin(code)):
+                return jsonify({"success": False, "error": "同步码不正确"}), 403
             if identity and identity != final_identity:
                 conn.execute(
                     "UPDATE member_accounts SET identity = ?, updated_at = ? WHERE name = ?",
@@ -500,14 +522,17 @@ def api_session():
                 )
                 final_identity = identity
         else:
-            # 老成员认领：PIN 为空 → 本次提交的即为初始 PIN
-            conn.execute(
-                "UPDATE member_accounts SET pin_hash = ?, "
-                "identity = CASE WHEN ? != '' THEN ? ELSE identity END, updated_at = ? "
-                "WHERE name = ?",
-                (_hash_pin(pin), identity, identity, now, name),
-            )
-            if identity:
+            # 未设码：开放进入；填了码即趁机设上
+            if code:
+                conn.execute(
+                    "UPDATE member_accounts SET pin_hash = ?, updated_at = ? WHERE name = ?",
+                    (_hash_pin(code), now, name),
+                )
+            if identity and identity != final_identity:
+                conn.execute(
+                    "UPDATE member_accounts SET identity = ?, updated_at = ? WHERE name = ?",
+                    (identity, now, name),
+                )
                 final_identity = identity
         # 设备登记：这台设备以后归属该成员（供后台统计设备数）
         conn.execute(
@@ -582,6 +607,40 @@ def api_profile_get():
     }
     resp.update(_device_cookie_payload(device_id, device_sig))
     return jsonify(resp)
+
+
+@app.route("/api/admin/member-reset-code", methods=["POST"])
+def api_admin_member_reset_code():
+    """重置某成员的同步码为「未设置」（v1.18.1：忘记码的出路）。
+
+    置空后该姓名回到**开放进入**状态：任何设备填该姓名即可进入并重设同步码。
+    不提供自助找回——没有手机号/邮箱，任何自助找回都是绕过同步码的后门；
+    「找管理员重置」对这个内部工具就是足够好的流程。
+    鉴权走 /api/admin/* 钩子；操作写审计。
+    """
+    ip = request.remote_addr or "127.0.0.1"
+    if not _admin_require_rate(ip):
+        return jsonify({"success": False, "error": "请求过于频繁"}), 429
+
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "缺少成员姓名"}), 400
+    _ensure_accounts_table()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT name FROM member_accounts WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            return jsonify({"success": False, "error": "没有这个成员"}), 404
+        conn.execute(
+            "UPDATE member_accounts SET pin_hash = '', updated_at = ? WHERE name = ?", (now, name)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    log.warning("管理员重置同步码: %s from %s", name, ip)
+    return jsonify({"success": True, "name": name})
 
 
 @app.route("/api/admin/members", methods=["GET"])

@@ -7,11 +7,12 @@ import { fetchMonthlySummary, monthlySummaryHtml } from "./summary.js";
 // ---------------------------------------------------------------- 成员账号（v1.18.0 登录体系）
 
 /**
- * 姓名 + 4 位 PIN 即账号凭证（v1.18.0，老大拍板：名字当登录凭证 + PIN 防冒填）。
+ * 姓名即身份 + **同步码（选填）**（v1.18.1，老大定：码不叫 PIN、非必填，
+ * 本质是「多设备同步」而不是密码系统）。
  *
- * 与 v1.14–1.17「纯署名」的区别：登录成功后服务端以**姓名**作为设备标识签发
- * （HMAC），历史/统计/去重全部按人隔离——换设备登录同一姓名即合并，
- * 老数据经一次性迁移继续可见。
+ * 与 v1.14–1.17「纯署名」的区别：进入后服务端以 member_key 作为设备标识签发
+ * （HMAC），历史/统计/去重全部按人隔离——多设备填同一姓名即合并，
+ * 老数据经一次性迁移继续可见。规则见后端 api_session 文档字符串。
  *
  * 防再犯（v1.17.3 的教训）：所有 DOM 操作都在「弹窗显示」之后，且节点访问
  * 一律走带存在性检查的帮手函数。
@@ -26,12 +27,12 @@ const IDENTITY_LABELS = {
 function el(id) { return document.getElementById(id); }
 function setText(id, text) { const n = el(id); if (n) n.textContent = text; }
 
-/** 页面加载时判定登录态：已登录不打扰；未登录弹登录/注册框 */
+/** 页面加载时判定进入状态：已进入不打扰；未进入弹引导框 */
 export function initProfile() {
   apiFetch("/api/profile")
     .then((profile) => {
       if (profile && profile.name) {
-        applySession(profile);          // 已登录
+        applySession(profile);          // 已进入
         return;
       }
       // 未登录：本设备历史归属过谁就预填谁（迁移后的老设备）
@@ -48,18 +49,24 @@ export function initProfile() {
 export function openLoginModal(prefillName) {
   const modal = el("nameModal");
   const input = el("memberNameInput");
-  const pin = el("memberPinInput");
+  const code = el("memberPinInput");
   if (!modal || !input) return;
   const returning = Boolean(prefillName);
+  const loggedIn = Boolean(state.memberName);  // 已登录打开 = 修改信息/改码
   input.value = prefillName || "";
-  if (pin) pin.value = "";
-  setText("nameModalTitle", returning ? "登录" : "先设置你的姓名");
-  setText("nameModalDesc", returning
-    ? `检测到本机曾使用「${prefillName}」，请输入 PIN 登录后查看你的提取记录。`
-    : "请填写真实姓名，并设置一个 4 位 PIN（换设备登录用）。");
+  if (code) {
+    code.value = "";
+    code.placeholder = loggedIn ? "新同步码（不改则留空）" : "选填，如 1234";
+  }
+  setText("nameModalTitle", loggedIn ? "修改信息" : returning ? "登录" : "先设置你的姓名");
+  setText("nameModalDesc", loggedIn
+    ? "可修改身份，或设置新的同步码（留空则不变）。"
+    : returning
+      ? `检测到本机曾使用「${prefillName}」，填姓名即可继续；若该姓名设过同步码，需要填对才能进入。`
+      : "请填写真实姓名。同步码选填——多台设备填同一个码，提取记录就会合并在一起。");
   paintIdentityChoices(state.memberIdentity || "");
   modal.classList.remove("hidden");
-  setTimeout(() => (returning ? pin : input).focus(), 50);
+  setTimeout(() => (loggedIn ? code : input).focus(), 50);
   // 月度数字异步填充（失败静默，不阻塞登录）
   const slot = el("nameMonthlySlot");
   if (slot) {
@@ -89,29 +96,29 @@ export function closeNameModal() {
 
 export function skipMemberName() {
   closeNameModal();
-  showToast("未登录：可随时在统计页登录");
+  showToast("未设置姓名，可随时在统计页填写");
 }
 
-/** 登录 / 注册 / 认领：三种情况服务端一个入口 */
+/** 进入 / 注册 / 改码：服务端一个入口 */
 export async function submitSession() {
   const name = (el("memberNameInput")?.value || "").trim();
-  const pin = (el("memberPinInput")?.value || "").trim();
+  const code = (el("memberPinInput")?.value || "").trim();
   const identity = state.memberIdentity || "";
   if (!name) { showToast("请输入姓名"); return; }
-  if (!/^\d{4}$/.test(pin)) { showToast("PIN 需为 4 位数字"); return; }
+  if (code && !/^\d{4}$/.test(code)) { showToast("同步码需为 4 位数字"); return; }
   if (!identity) { showToast("请选择身份"); return; }
   try {
     const r = await apiFetch("/api/session", {
       method: "POST",
-      body: JSON.stringify({ name, pin, identity }),
+      body: JSON.stringify({ name, code, identity }),
     });
     applySession(r);
     closeNameModal();
-    showToast(`已登录：${r.name} · ${IDENTITY_LABELS[r.identity] || ""}`);
+    showToast(state.memberName && r.name === state.memberName ? "已保存" : `已进入：${r.name}`);
     // 统计页若开着，立刻刷新姓名/身份展示
     if (!el("tab-stats").classList.contains("hidden")) loadStats().catch(() => {});
   } catch (e) {
-    showToast(e.message || "登录失败，请稍后再试");
+    showToast(e.message || "操作失败，请稍后再试");
   }
 }
 
@@ -129,7 +136,7 @@ function applySession(r) {
   }
 }
 
-/** 退出登录：清本地凭证 → 换匿名身份 → 重新弹登录框 */
+/** 退出：清本地凭证 → 换匿名身份 → 重新弹引导框 */
 export async function logout() {
   const fresh = await apiFetch("/api/session", { method: "DELETE" }).catch(() => null);
   state.memberName = "";
@@ -147,6 +154,6 @@ export async function logout() {
     localStorage.setItem("device_id", fresh.device_id);
     localStorage.setItem("device_sig", fresh.device_sig);
   }
-  showToast("已退出登录");
+  showToast("已退出，提取记录将不再与此人关联");
   openLoginModal("");
 }

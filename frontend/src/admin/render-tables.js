@@ -72,6 +72,7 @@ export function renderMembers(members, dist) {
       <td class="num">${fmt(m.ok_total)}</td>
       <td class="num">${fmt(m.device_count)}</td>
       <td style="color:var(--text2);font-size:12px;">${esc(m.last_active || "-")}</td>
+      <td><button class="btn btn-sm btn-ghost" onclick="resetMemberCode('${esc(m.name)}')" title="把该成员的同步码重置为未设置（忘记码时用）">重置同步码</button></td>
     </tr>`).join("");
 }
 

@@ -1,6 +1,6 @@
 import "./styles/admin.css";
 
-import { adminFetch, exportCsv, logout } from "./admin/core.js";
+import { adminFetch, exportCsv, logout, showToast } from "./admin/core.js";
 import { overlay, content } from "./admin/state.js";
 import { loadAll, refreshCore, currentView } from "./admin/load.js";
 import {
@@ -11,6 +11,24 @@ import {
 // 因为它的执行时机与 DOM 顺序耦合（布局必须先于数据渲染）。这里只 import
 // 触发其模块体执行，不再显式调用。
 import "./admin/layout-editor.js";
+
+/* 重置成员同步码（v1.18.1）：成员忘记码时的唯一出路。
+   置空后该姓名回到开放状态，成员下次填姓名即可进入并重设同步码。
+   二次确认：重置会影响该成员多设备同步，别手滑。 */
+async function resetMemberCode(name) {
+  if (!name) return;
+  if (!confirm(`确定重置「${name}」的同步码？\n\n重置后该姓名回到未设置状态，任何设备填这个姓名都能进入并重设同步码。`)) return;
+  try {
+    await adminFetch("/api/admin/member-reset-code", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    showToast(`已重置 ${name} 的同步码`);
+    loadAll();
+  } catch (e) {
+    showToast(e.message || "重置失败");
+  }
+}
 
 /* ------------------------------------------------------------------
  * P4 过渡层：后台 HTML 里有 12 处内联 onclick 依赖**全局函数名**
@@ -25,6 +43,7 @@ Object.assign(window, {
   logout, loadAll, exportCsv,
   loadPool, poolCheckAll, poolDeepCheck, togglePoolEditor,
   poolToggleFailover, poolCreateAccount, saveAccountEdit,
+  resetMemberCode,
 });
 
 document.getElementById("rangeSelect").onchange = loadAll;
