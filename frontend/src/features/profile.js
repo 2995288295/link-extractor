@@ -48,8 +48,7 @@ export async function openNameModal() {
   let identity = state.memberIdentity || "";
   input.value = name;
   paintIdentityChoices(identity);
-  document.getElementById("nameModalTitle").textContent =
-    name ? "完善你的信息" : "先设置你的姓名";
+  setTitle(name ? "完善你的信息" : "先设置你的姓名");
   modal.classList.remove("hidden");
   setTimeout(() => input.focus(), 50);
   // 姓名与身份以服务端口径为准：换设备后本地为空、或本地只存了旧字段时，
@@ -64,8 +63,7 @@ export async function openNameModal() {
       // 拉到了就回填（不关弹窗，用户继续编辑）
       input.value = name;
       paintIdentityChoices(identity);
-      document.getElementById("nameModalTitle").textContent =
-        name ? "完善你的信息" : "先设置你的姓名";
+      setTitle(name ? "完善你的信息" : "先设置你的姓名");
     } catch (e) { /* 拉取失败保留本地值，静默 */ }
   }
   // 月度数字异步填充（拉取失败就留空，不影响填信息）
@@ -76,6 +74,14 @@ export async function openNameModal() {
       slot.innerHTML = monthlySummaryHtml(data);
     }).catch(() => {});
   }
+}
+
+/** 标题节点缺失时静默降级：不能因为一个标题让整个弹窗打不开
+ *  （v1.17.3：HTML 漏写 id 导致 getElementById 返回 null 抛 TypeError，
+ *   弹窗在 classList.remove("hidden") 之前就挂了，表现=按钮点了没反应）。 */
+function setTitle(text) {
+  const el = document.getElementById("nameModalTitle");
+  if (el) el.textContent = text;
 }
 
 function paintIdentityChoices(identity) {

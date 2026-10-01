@@ -4,6 +4,21 @@
 
 ## [未发布]
 
+### 修复（v1.17.3 · 2026-10-01）· 弹窗打不开 / 点「设置姓名」无反应（根因）
+
+- **根因（我的低级错误）**：v1.16.0 重写引导框 HTML 时，标题只写了
+  `class="name-modal-title"`，**漏了 `id="nameModalTitle"`**。而
+  `openNameModal()` 的第一件事就是
+  `document.getElementById("nameModalTitle").textContent = ...`
+  → 拿到 null 抛 TypeError → **函数在 `classList.remove("hidden")` 之前就挂了**。
+  两个现象一次说清：自动弹窗的异常被 initProfile 的 promise catch 吞掉、
+  点按钮的异常在 onclick 里静默失败——都是「看起来什么都没发生」。
+- **修法**：HTML 补上 id；同时把标题更新抽成 `setTitle()` 并做**存在性降级**
+  （节点缺失时静默跳过，绝不让一个标题拖垮整个弹窗）。
+- **防再发**：跑了一遍全量交叉比对——JS 里 61 处 `getElementById` 引用
+  ↔ 两个 HTML 里定义的 id，逐一核对无其他缺失。
+- 教训：DOM 操作别在「显示元素」之前碰可能不存在的节点；显示要放在最前。
+
 ### 修复（v1.17.2 · 2026-10-01）· 一轮系统性复查的四个问题
 
 - **BUG 1｜后台徽标一直没有样式**：admin.css 只 import `pages/admin.css`，
