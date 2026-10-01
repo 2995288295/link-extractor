@@ -32,7 +32,7 @@ function renderMonthlyCard(monthly, profile) {
   const name = serverName || state.memberName || "";
   const nameHtml = name
     ? `<span style="font-weight:600;">${esc(name)}</span> <button class="btn btn-sm btn-ghost" onclick="openNameModal()">改名</button>`
-    : `<button class="btn btn-sm btn-primary" onclick="openNameModal()">设置姓名（用于后台统计）</button>`;
+    : `<button class="btn btn-sm btn-primary" onclick="openNameModal()">设置姓名</button>`;
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
       <h2 style="margin:0;">本月有效条数：<span style="color:var(--primary);font-size:24px;">${monthly.valid_count}</span> 条</h2>

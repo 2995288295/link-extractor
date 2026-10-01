@@ -42,7 +42,7 @@ export function closeNameModal() {
 
 export function skipMemberName() {
   closeNameModal();
-  showToast("未署名：后台将显示为「未署名」，随时可在统计页设置");
+  showToast("未设置姓名，可随时在统计页补填");
 }
 
 export async function saveMemberName() {
