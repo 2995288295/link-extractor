@@ -2,12 +2,16 @@ import { state } from "../core/state.js";
 import { apiFetch } from "../core/api.js";
 import { showToast } from "../ui/toast.js";
 import { loadStats } from "./stats.js";
+import { fetchMonthlySummary, monthlySummaryHtml } from "./summary.js";
 
 // ---------------------------------------------------------------- 成员署名
 
 /**
- * 姓名 = 身份（v1.14.0，无密码）。首次访问弹登记框；后台按姓名聚合产量。
- * 名字只存 localStorage + 服务端 members 表，可随时改。
+ * 姓名 = 身份（v1.14.0，无密码）。首次访问弹引导框（含本月有效条数展示），
+ * 已署名则不弹；姓名可随时改。
+ *
+ * v1.16.0：引导框与月度数字合并为一次性展示。此前月度提示条（z-index 1200）
+ * 与全屏遮罩弹窗（z-index 1000）同帧弹出、互相遮挡，被反馈「界面很奇怪」。
  */
 
 export function initProfile() {
@@ -15,11 +19,19 @@ export function initProfile() {
   openNameModal();
 }
 
-export function openNameModal() {
+export async function openNameModal() {
   const modal = document.getElementById("nameModal");
   const input = document.getElementById("memberNameInput");
   if (!modal || !input) return;
   input.value = state.memberName || "";
+  // 月度数字异步填充（拉取失败就留空，不影响填名字）
+  const slot = document.getElementById("nameMonthlySlot");
+  if (slot) {
+    slot.innerHTML = "";
+    fetchMonthlySummary().then((data) => {
+      slot.innerHTML = monthlySummaryHtml(data);
+    }).catch(() => {});
+  }
   modal.classList.remove("hidden");
   setTimeout(() => input.focus(), 50);
 }

@@ -295,32 +295,54 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   border-radius: 50%; background: rgba(10, 13, 18, .80); color: #fff; font-size: 22px; cursor: pointer;
 }
 
-/* ===== 视频号平台标 + 重复提报警示 + 本月有效条数弹窗（v1.13.1） ===== */
+/* ===== 视频号平台标 + 重复提报警示（v1.13.1） ===== */
 /* 平台识别色与品牌体系无关，保留原色系（同 §4.3 约定） */
 .platform-sph { background: #E8F8EE; color: #07A254; }
 
 /* 重复提报警示：warn 语义色（浅底 + 描边） */
 .result-badge.badge-dup { background: var(--warn-soft); color: var(--warn-ink); border: 1px solid var(--warn-border); }
 
-/* 本月有效条数小提示（首页加载时弹出，10s 自动收起） */
-.monthly-tip {
-  position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
-  z-index: 1200; width: min(420px, calc(100vw - 24px));
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: var(--r-md, 12px); box-shadow: 0 8px 24px rgba(10, 13, 18, .12);
-  padding: 12px 36px 12px 14px; font-size: var(--fs-sm, 13px); line-height: 1.6;
-  animation: monthly-tip-in .25s ease;
+/* ===== 首次访问引导框（v1.16.0）=====
+ * 取代 v1.13.1 的月度提示条 + v1.14.0 的姓名弹窗组合：两者曾同帧弹出、
+   层叠互相遮挡。现合并为一次性引导框，浅色磨砂遮罩（不再复用封面大图的
+   深色皮肤——轻量表单套 78% 深色遮罩会又暗又重）。 */
+.name-modal {
+  position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center;
+  padding: 20px; background: rgba(247, 248, 250, .82); backdrop-filter: blur(6px);
 }
-.monthly-tip.leaving { opacity: 0; transition: opacity .3s ease; }
-.monthly-tip-title { font-size: var(--fs-md, 14px); color: var(--ink); }
-.monthly-tip-title strong { font-size: 18px; color: var(--brand, #1769E0); }
-.monthly-tip-detail { color: var(--ink-2, #5B6472); }
-.monthly-tip-rule { color: var(--ink-3, #98A1B0); font-size: var(--fs-xs, 12px); }
-.monthly-tip-close {
-  position: absolute; top: 6px; right: 8px; border: none; background: none;
-  font-size: 18px; color: var(--ink-3, #98A1B0); cursor: pointer; padding: 2px 6px;
+.name-modal-box {
+  width: min(100%, 380px); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--r-lg, 16px);
+  box-shadow: 0 16px 48px rgba(10, 13, 18, .16); padding: 22px;
+  animation: name-modal-in .22s ease;
 }
-@keyframes monthly-tip-in {
-  from { opacity: 0; transform: translate(-50%, -8px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+.name-modal-title { margin: 0 0 6px; font-size: 18px; color: var(--ink); }
+.name-modal-desc { margin: 0 0 16px; color: var(--ink-2); font-size: 13px; line-height: 1.7; }
+.name-modal-input {
+  width: 100%; padding: 11px 12px; border: 1px solid var(--border-strong);
+  border-radius: 10px; font-size: 15px; box-sizing: border-box; background: var(--surface-2);
+}
+.name-modal-input:focus { outline: 2px solid var(--brand); outline-offset: 1px; background: var(--surface); }
+.name-modal-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+@keyframes name-modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 月度有效条数横幅（引导框顶部 + 复用月度口径） */
+.monthly-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; margin-bottom: 16px;
+  background: var(--brand-soft, #EAF2FE); border: 1px solid var(--brand-border, #C9DDFA);
+  border-radius: 12px;
+}
+.monthly-banner-num { font-size: 13px; color: var(--brand-ink, #1256BA); white-space: nowrap; }
+.monthly-banner-num span { font-size: 26px; font-weight: 700; color: var(--brand); margin-right: 2px; }
+.monthly-banner-title { font-size: 13px; font-weight: 600; color: var(--brand-ink, #1256BA); }
+.monthly-banner-sub { font-size: 11px; color: var(--ink-2); margin-top: 2px; line-height: 1.6; }
+
+/* 移动端适配：引导框小屏不贴边 */
+@media (max-width: 480px) {
+  .name-modal-box { padding: 18px; }
+  .monthly-banner { flex-direction: column; align-items: flex-start; gap: 4px; }
 }

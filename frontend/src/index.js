@@ -7,7 +7,6 @@ import { doExtract, retryLink, retryFailedLinks, readClipboardExtract } from "./
 import { copyText } from "./features/copy.js";
 import { toggleCaption } from "./features/results.js";
 import { loadHistory, clearHistory, setHistoryFilter, onHistorySearch } from "./features/history.js";
-import { showMonthlySummary } from "./features/summary.js";
 import { initProfile, openNameModal, saveMemberName, skipMemberName } from "./features/profile.js";
 import { unescapeHtml } from "./core/dom.js";
 
@@ -61,8 +60,6 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
 // 口令模块已隐藏（服务端未启用 ACCESS_TOKEN 时不校验），打开即用
 window.addEventListener("load", function () {
   // 预留：若以后恢复访问口令，可在此调用 apiFetch("/api/history") 验证
-  // 首页小提示：本月有效条数（失败静默，不打扰主功能）
-  showMonthlySummary();
-  // 首次访问提示署名（已署名则不打扰）
+  // 首次访问的引导框（含月度有效条数展示，一次性弹）；已署名则不打扰
   initProfile();
 });
