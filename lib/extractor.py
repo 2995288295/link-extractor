@@ -83,18 +83,15 @@ class SphLinkInvalidError(InvalidInputError):
 
 
 class ContentExpiredError(ExtractError):
-    """平台明确表示作品不存在 / 已删除 / 不可公开访问。"""
+    """平台明确表示作品不存在 / 已删除 / 不可公开访问。
+
+    ⚠️ 判死门槛（2026-10-03 v1.22.0 收紧）：只有平台**亲口说明**原因
+    （抖音 filter 的中文 detail、「审核中」）才算；小红书笔记页 404 /
+    页面状态容器为空一律**不**判死——平台「这次没给」≠「内容没了」，
+    实测按这两个信号判死的链接 86% 重测存活（详见 CHANGELOG v1.22.0）。
+    """
 
     kind = "expired_content"
-
-
-class NoteDeletedError(ContentExpiredError):
-    """平台**实证**内容不存在：笔记页 404 / 页面明确提示已删除或设为私密。
-
-    与普通 ContentExpiredError（抖音 filter 还混着「审核中」等可恢复态）
-    的区别：只有本类才允许登记死链缓存（v1.13.1 起死链登记改实证制，
-    限流失败绝不计入——2026-10-01 复盘发现活链被错标 24h）。
-    """
 
 
 class PlatformLimitedError(ExtractError):
@@ -812,49 +809,13 @@ def _resolve_short_link(url: str) -> str:
         extra = _shortlink_extra_shot(platform, url, candidates)
         if extra:
             return extra
-    # 全部失败：只抛限流错误。⚠️ 这里**不能**记死链（v1.13.1 修正）：
-    # v1.12.0 曾把短链限流失败计入死链连败（这里是唯一计数入口），晚间
-    # 高峰把活链错标 24h——复盘实证：同一 URL 被标后次日成功提取，且用户
-    # 重贴被缓存直接挡掉。死链登记只认平台实证，见 _mark_dead_link。
+    # 全部失败：只抛限流错误。短链阶段从不判死（v1.13.1 起就如此）：
+    # 限流是窗口式软限制，判死会把活链错标（晚间高峰曾成片冤案）。
+    # v1.22.0 起死链缓存整体退役，全链路不再有「错标 24h」的问题。
     raise ShortLinkBlockedError(_XHS_LIMITED_MESSAGE)
 
 
-# ------------------------------------------- 死链识别（v1.12.0 引入，v1.13.1 改实证制）
-
-_DEAD_LINK_TTL = float(os.environ.get("DEAD_LINK_TTL_SECONDS", "86400"))
-_dead_links: dict = {}
-_dead_link_lock = threading.Lock()
-
-
-def _mark_dead_link(url: str) -> None:
-    """登记一条**实证**死链：24h 内同链不再打平台，直接秒回。
-
-    登记入口只有 NoteDeletedError（笔记页 404、页面明确提示已删除/设为
-    私密）。限流、审核中等一切可恢复失败一律不记；24h 后自动过期，
-    重新提交会真打一次平台复核。进程内记忆，重启即清零。
-    """
-    now = time.monotonic()
-    with _dead_link_lock:
-        if len(_dead_links) > 1000:  # 粗暴防膨胀：删最老一半
-            for k in sorted(_dead_links, key=_dead_links.get)[:500]:
-                del _dead_links[k]
-        _dead_links[url] = now
-
-
-def _is_dead_link(url: str) -> bool:
-    """实证死链（24h 内）→ 打平台前直接秒回。"""
-    now = time.monotonic()
-    with _dead_link_lock:
-        ts = _dead_links.get(url)
-        if ts is None:
-            return False
-        if now - ts > _DEAD_LINK_TTL:
-            del _dead_links[url]
-            return False
-        return True
-
-
-# ------------------------------------------------- 短链补一枪（2026-09-27 v1.12.0）
+# ------------------------------------------- 短链补一枪（2026-09-27 v1.12.0）
 
 _EXTRA_SHOT_MAX_PER_DAY = int(os.environ.get("AJIASU_EXTRA_SHOT_MAX_PER_DAY", "8"))
 _extra_shot_state = {"date": "", "count": 0}
@@ -1237,7 +1198,14 @@ def _extract_douyin_locked(url: str, telemetry: Optional[dict[str, int]] = None)
         detail = filter_entry.get("detail_msg") or filter_entry.get("notice") or ""
         # 原始代号只进日志，不给用户看（用户看不懂 h265_video 这类内部字段值）。
         logger.info("抖音未返回作品: reason=%s detail=%s", reason or "-", detail or "-")
-        raise ContentExpiredError(_douyin_filter_message(reason, detail))
+        message = _douyin_filter_message(reason, detail)
+        # 平台只给了个技术代号（如 h265_video）、没亲口说明原因：作品多半还在，
+        # 只是网页端拿不到——按「暂时拿不到」归因，不判内容失效（2026-10-03 复盘：
+        # 这类失败重测 12/17 直接成功）。只有平台说明原因（审核中 / 权限或已删除）
+        # 才按内容失效处理。
+        if message == _DOUYIN_LIMITED_MESSAGE:
+            raise UpstreamDataMissingError(message)
+        raise ContentExpiredError(message)
 
     item = item_list[0]
     video = item.get("video") or {}
@@ -1379,8 +1347,10 @@ def _extract_xhs_initial_state(
     source_url = _extract_first_url(url)
     response, final_url = _fetch_xhs_note_page(source_url, session, timeout=30)
     if response.status_code == 404:
-        # 平台实证：笔记页 404 = 内容不存在（已删除/链接失效），允许登记死链。
-        raise NoteDeletedError("该笔记已删除或暂不可见")
+        # 2026-10-03 复盘（v1.22.0）：小红书对活笔记也会间歇性返回 404/空容器
+        # （风控/临时异常），按这两个信号判死 86% 是冤案，还曾被死链缓存锁 24h。
+        # 一律按「暂时拿不到」处理，不再判死、不再登记死链缓存。
+        raise UpstreamDataMissingError("该笔记暂时无法访问")
     response.raise_for_status()
 
     html = response.text
@@ -1403,11 +1373,11 @@ def _extract_xhs_initial_state(
     if not isinstance(note, dict):
         # 区分「笔记没了」和「页面结构变了」——两者处置方式完全不同：
         # 容器非空却取不到笔记，说明字段结构和预期不一致（上游改动）；
-        # 容器为空，则是平台没给这条笔记（已删除 / 仅自己可见）。
+        # 容器为空，是平台这次没给这条笔记——可能是已删除/仅自己可见，
+        # 也可能是风控/临时异常（实测活笔记同样会这样返回），不判死。
         if structure_broken:
             raise PageStructureError("暂时无法获取该笔记内容")
-        # 平台实证：容器为空 = 平台没给这条笔记（已删除 / 仅自己可见）。
-        raise NoteDeletedError("该笔记已删除或设为私密")
+        raise UpstreamDataMissingError("该笔记暂时无法访问")
 
     note_id = note.get("noteId") or ""
     if not note_id:
@@ -2233,20 +2203,6 @@ def extract_link(raw: str) -> ExtractResult:
         # 避免短链被解析成 douyin.com/video/xxx 后再被 _extract_douyin 重复请求一次
         is_xhs = "xiaohongshu" in url or "xhslink" in url
         is_sph = "weixin.qq.com" in url.lower()
-        # 作品 ID 预提取（纯本地正则）：死链门与后面的缓存键都要用。
-        post_id = _extract_post_id_from_url(url)
-        # 死链秒回：平台**实证**内容不存在的链接 24h 内不再打平台。
-        # 原始链接与作品 ID 双键核对（同一作品换分享形式重贴也能命中）。
-        if _is_dead_link(url) or (post_id and _is_dead_link(post_id)):
-            logger.info("死链秒回（不打平台）: %s", url[:60])
-            return ExtractResult(
-                success=False,
-                error="该笔记已删除或暂不可见",
-                hint="请从 App 重新复制分享链接",
-                error_kind="expired_content",
-                telemetry={"input_ms": round((time.perf_counter() - started) * 1000)},
-            )
-
         # 缓存优化：先从 URL 预提取作品 ID 查缓存（同一视频不同链接命中秒回）
         post_id = _extract_post_id_from_url(url)
         cache_key = _cache_key(url)
@@ -2360,12 +2316,6 @@ def extract_link(raw: str) -> ExtractResult:
     except Exception as e:
         # 归因按**异常类型**走（error_kind_of），不再对报错文案做关键词匹配。
         kind = error_kind_of(e)
-        # 实证死链登记：只有 NoteDeletedError（平台明示内容不存在）才记，
-        # 同时登记原始链接与作品 ID 两个键，换分享形式重贴也能命中。
-        if isinstance(e, NoteDeletedError):
-            _mark_dead_link(url)
-            if post_id:
-                _mark_dead_link(post_id)
         # 只信我们自己定义的业务异常（ExtractError 及其子类）能带用户文案。
         # 此前这里是 (ValueError, RuntimeError) —— 任何库抛的 ValueError 都会被原样透传
         # （典型：json.JSONDecodeError → 用户看到 "Expecting value: line 1 column 1 (char 0)"）。
