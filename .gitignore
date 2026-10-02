@@ -26,3 +26,4 @@ frontend/.vite/
 .DS_Store
 Thumbs.db
 .codegraph/
+._*
