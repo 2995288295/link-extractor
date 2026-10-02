@@ -19,7 +19,10 @@ export function switchTab(tab) {
 export function handleTabKey(event) {
   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
   const tabs = [...document.querySelectorAll(".tab")];
-  const current = tabs.indexOf(event.currentTarget);
+  // v1.19.0 事件委托：keydown 绑在 .tab-bar 上，event.target 是获得焦点的 tab
+  //（内联 onkeydown 时代用的是 event.currentTarget，委托后 currentTarget 是 bar 本身）
+  const current = tabs.indexOf(event.target.closest(".tab"));
+  if (current === -1) return;
   let next = current;
   if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
   if (event.key === "ArrowRight") next = (current + 1) % tabs.length;

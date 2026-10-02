@@ -2,6 +2,18 @@
 
 本项目的所有重要变更均记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.20.0] · 2026-10-02 · 用户页 2.0：平台 chip 三色 + 事件委托 + 批量体验
+
+### 新增
+- **平台 chip 三色**（老大定调彩底白字）：抖音黑 `#1A1A1A` / 小红书红 `#E02038`（品牌红压白字对比度不足，加深一档至 AA 达标）/ 视频号深金黄 `#9C6400`（亮黄+白字物理不可读）；结果卡左侧 3px 平台色条同色。
+- **一键复制全部**：结果区新增「复制全部链接 / 复制全部文案」，只收成功项按行拼接。
+- **提取中骨架卡 + 进度条**：识别 N 条先铺 N 张 shimmer 占位卡，NDJSON 流式逐张填充；顶部双段进度条（蓝=成功/红=失败），完成 2.5s 后收起。
+- **P3 事件委托**：新增 `core/actions.js`，约 40 处内联 onclick/oninput/onkeydown 全部收口为 data-action；删除 index.js 的全局函数过渡层（Object.assign(window)）。
+
+### 修复
+- `retryLink` 引用未 import 的 `renderSingleResult`：重试成功即 ReferenceError（v1.18.x 起就带着）。
+- 补 v1.19.0 git tag（该提交漏打，页脚版本号一直停在 v1.18.3）。
+
 ## [未发布]
 
 ### 新增（v1.19.0 · 2026-10-02）· 后台登录「记住我」：90 天免登录

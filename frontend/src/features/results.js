@@ -11,22 +11,28 @@ export function coverPreviewHtml(coverUrl, alt, platformRaw = "") {
     </button>`;
   }
   const proxyUrl = "/api/cover?url=" + encodeURIComponent(coverUrl);
-  return `<button class="${buttonClass}" type="button" data-src="${proxyUrl}" data-alt="${esc(label)}" onclick="openCoverPreview(this.dataset.src, this.dataset.alt)" aria-label="预览${esc(label)}">
+  return `<button class="${buttonClass}" type="button" data-src="${proxyUrl}" data-alt="${esc(label)}" data-action="open-cover-preview" aria-label="预览${esc(label)}">
     <span class="cover-placeholder" aria-hidden="true">${platformMark}</span>
     <img class="cover" src="${proxyUrl}" loading="lazy" decoding="async" referrerpolicy="no-referrer" alt="" onerror="this.closest('.cover-button').classList.add('image-failed'); this.remove()">
     <span class="cover-hint" aria-hidden="true">预览</span>
   </button>`;
 }
 
+/** platform_raw → 结果卡 / chip 的平台 class 名；未识别平台返回空串（不加 class） */
+function platformClass(raw) {
+  if (raw === "douyin") return "douyin";
+  if (raw === "xiaohongshu") return "xiaohongshu";
+  if (raw === "sph") return "sph";
+  return "";
+}
+
 /** 生成单条结果卡片 HTML（renderResults 与重试替换共用） */
 export function resultCardHtml(r, i) {
-  const platformTag = r.platform_raw === "douyin"
-    ? '<span class="platform-tag platform-douyin">抖音</span>'
-    : r.platform_raw === "xiaohongshu"
-      ? '<span class="platform-tag platform-xiaohongshu">小红书</span>'
-      : r.platform_raw === "sph"
-        ? '<span class="platform-tag platform-sph">视频号</span>'
-        : "";
+  const pf = platformClass(r.platform_raw);
+  const platformNames = { douyin: "抖音", xiaohongshu: "小红书", sph: "视频号" };
+  const platformTag = pf
+    ? `<span class="platform-tag platform-${pf}">${platformNames[pf]}</span>`
+    : "";
 
   const badge = r.success
     ? (r.partial
@@ -62,13 +68,13 @@ export function resultCardHtml(r, i) {
         <div class="field-label">文案</div>
         <div class="caption-wrap">
           <div class="field-value caption">${esc(r.caption) || "（无文案）"}</div>
-          <button class="caption-toggle" type="button" onclick="toggleCaption(this)">展开全部 ▼</button>
+          <button class="caption-toggle" type="button" data-action="toggle-caption">展开全部 ▼</button>
         </div>
       </div>
       ${r.hint ? `<div class="field partial-hint"><div class="field-label">提取提示</div><div class="field-value">${esc(r.hint)}</div></div>` : ""}
       <div class="copy-row">
-        <button class="btn btn-copy" onclick="copyText(unescapeHtml(this.parentNode.previousElementSibling.previousElementSibling.querySelector('.field-value').innerText), this)" data-kind="canonical">📋 复制链接</button>
-        <button class="btn btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.caption').innerText, this)" data-kind="caption">📋 复制文案</button>
+        <button class="btn btn-copy" data-action="copy-canonical" data-kind="canonical">📋 复制链接</button>
+        <button class="btn btn-copy" data-action="copy-caption" data-kind="caption">📋 复制文案</button>
       </div>
         </div>
       </div>`;
@@ -90,7 +96,7 @@ export function resultCardHtml(r, i) {
       html += `</div>`;
     }
     if (r.video_url && r.video_url !== r.canonical_url) {
-      html += `<div class="result-actions"><button class="btn btn-sm btn-ghost" onclick="copyText(this.closest('.result-item').dataset.videoUrl, this)">复制原视频链接</button></div>`;
+      html += `<div class="result-actions"><button class="btn btn-sm btn-ghost" data-action="copy-attr" data-copy-attr="videoUrl">复制原视频链接</button></div>`;
     }
   } else {
     html += `
@@ -104,8 +110,8 @@ export function resultCardHtml(r, i) {
       </div>
       ${r.hint ? `<div class="field"><div class="field-label">提示</div><div class="field-value" style="color:var(--text2);">${esc(r.hint)}</div></div>` : ""}
       <div class="copy-row" style="margin-top:12px;">
-        <button class="btn btn-ghost" onclick="copyText(this.closest('.result-item').dataset.originalUrl, this)">📋 复制原链接</button>
-        <button class="btn btn-ghost" onclick="retryLink(this, ${i})">🔄 重试这条</button>
+        <button class="btn btn-ghost" data-action="copy-attr" data-copy-attr="originalUrl">📋 复制原链接</button>
+        <button class="btn btn-ghost" data-action="retry-link">🔄 重试这条</button>
       </div>`;
   }
   return html;
@@ -135,7 +141,8 @@ export function renderResults(results) {
 
   results.forEach((r, i) => {
     const item = document.createElement("div");
-    item.className = "result-item";
+    const pf = platformClass(r.platform_raw);
+    item.className = "result-item" + (pf ? ` result-${pf}` : "");
     item.innerHTML = resultCardHtml(r, i);
     box.appendChild(item);
   });
@@ -145,7 +152,8 @@ export function renderResults(results) {
 /** 渲染单条结果卡片（供重试替换使用） */
 export function renderSingleResult(r, index) {
   const item = document.createElement("div");
-  item.className = "result-item";
+  const pf = platformClass(r.platform_raw);
+  item.className = "result-item" + (pf ? ` result-${pf}` : "");
   item.dataset.sourceIndex = String(Number.isInteger(r.source_index) ? r.source_index : index);
   item.dataset.originalUrl = r.original_url || "";
   item.dataset.videoUrl = r.video_url || "";

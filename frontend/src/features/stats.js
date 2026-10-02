@@ -37,8 +37,8 @@ function renderMonthlyCard(monthly, profile) {
     ? `<span class="identity-chip id-${esc(identity)}">${esc(identityLabels[identity] || identity)}</span>`
     : "";
   const nameHtml = name
-    ? `${esc(name)} ${identityChip} <button class="btn btn-sm btn-ghost" onclick="openLoginModal('${esc(name)}')">修改信息</button> <button class="btn btn-sm btn-ghost" onclick="logout()">退出登录</button>`
-    : `<button class="btn btn-sm btn-primary" onclick="openLoginModal('')">登录</button>`;
+    ? `${esc(name)} ${identityChip} <button class="btn btn-sm btn-ghost" data-action="open-login-modal" data-prefill-name="${esc(name)}">修改信息</button> <button class="btn btn-sm btn-ghost" data-action="logout">退出登录</button>`
+    : `<button class="btn btn-sm btn-primary" data-action="open-login-modal">登录</button>`;
   // 未设同步码的轻量提示（v1.18.3）：已登录成员不会再看引导框，没这条提示
   // 他们往往不知道可以补设，保护状态就一直空着。设了就消失。
   const codeHint = (name && profile && profile.code_set === false)

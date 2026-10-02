@@ -83,10 +83,10 @@ function renderHistoryList() {
             <div class="field-label">转换链接</div>
             <div class="field-value link" title="${esc(h.canonical_url || h.original_url)}">${esc(h.canonical_url || h.original_url)}</div>
           </div>
-          ${h.caption ? `<div class="field"><div class="field-label">文案</div><div class="caption-wrap"><div class="field-value caption">${esc(h.caption)}</div><button class="caption-toggle" type="button" onclick="toggleCaption(this)">展开全部 ▼</button></div></div>` : ""}
+          ${h.caption ? `<div class="field"><div class="field-label">文案</div><div class="caption-wrap"><div class="field-value caption">${esc(h.caption)}</div><button class="caption-toggle" type="button" data-action="toggle-caption">展开全部 ▼</button></div></div>` : ""}
           <div class="copy-row">
-            <button class="btn btn-sm btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.link').innerText, this)">复制链接</button>
-            ${h.caption ? `<button class="btn btn-sm btn-copy" onclick="copyText(this.parentNode.parentNode.querySelector('.caption').innerText, this)">复制文案</button>` : ""}
+            <button class="btn btn-sm btn-copy" data-action="copy-history-link">复制链接</button>
+            ${h.caption ? `<button class="btn btn-sm btn-copy" data-action="copy-history-caption">复制文案</button>` : ""}
           </div>`
             : `
           <div class="field" style="margin-top:8px;">

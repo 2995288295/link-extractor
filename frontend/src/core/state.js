@@ -30,4 +30,7 @@ export const state = {
 
   /* 历史清空的二次确认 */
   clearArmTimer: null,
+
+  /* 提取进度条完成后延迟收起的定时器（v1.19.0） */
+  progressHideTimer: null,
 };

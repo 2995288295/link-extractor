@@ -1,31 +1,13 @@
 import "./styles/index.css";
 
-import { switchTab, handleTabKey } from "./ui/tabs.js";
-import { openCoverPreview, closeCoverPreview, closeCoverPreviewOnBackdrop } from "./ui/lightbox.js";
-import { clearInput, onInputChange } from "./features/input.js";
-import { doExtract, retryLink, retryFailedLinks, readClipboardExtract } from "./features/extract.js";
-import { copyText } from "./features/copy.js";
-import { toggleCaption } from "./features/results.js";
-import { loadHistory, clearHistory, setHistoryFilter, onHistorySearch } from "./features/history.js";
-import { initProfile, openLoginModal, submitSession, skipMemberName, selectIdentity, logout } from "./features/profile.js";
-import { unescapeHtml } from "./core/dom.js";
+import { initProfile } from "./features/profile.js";
 
-/* ------------------------------------------------------------------
- * 第一期过渡层：24 处内联 onclick/oninput 依赖全局函数名（原样保留，零改动）。
- * 第三期改为 data-action + 事件委托后，这段连同各模板里的内联属性一起删除。
- *
- * ★ unescapeHtml 必须在这里 —— 第 828 行的内联属性是
- *   onclick="copyText(unescapeHtml(...))"，它在点击时直接取全局 unescapeHtml，
- *   不挂载会 ReferenceError（2.0 方案 §5.7 的清单漏了这一项）。
- * ------------------------------------------------------------------ */
-Object.assign(window, {
-  switchTab, handleTabKey, clearInput, onInputChange, doExtract, retryFailedLinks,
-  copyText, toggleCaption, retryLink, loadHistory, clearHistory,
-  openCoverPreview, closeCoverPreview, closeCoverPreviewOnBackdrop,
-  unescapeHtml,
-  readClipboardExtract, setHistoryFilter, onHistorySearch,
-  openLoginModal, submitSession, skipMemberName, selectIdentity, logout,
-});
+import "./core/actions.js";
+
+// v1.19.0：内联 onclick/oninput/onkeydown 已全部改为 data-action 事件委托
+//（见 core/actions.js），原第一期过渡层（Object.assign(window, {...})）删除。
+// 顺带修复：extract.js 的 retryLink 一直在用未 import 的 renderSingleResult
+//（重试成功即 ReferenceError），本次随委托改造一并修掉。
 
 // ---------- 移动端交互（C 项） ----------
 // 注册 PWA Service Worker（HTTP 环境注册失败会静默忽略，不影响功能）

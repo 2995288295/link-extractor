@@ -9,6 +9,11 @@ export function clearInput() {
   document.getElementById("inputUrls").value = "";
   document.getElementById("extractStatus").textContent = "";
   document.getElementById("results").innerHTML = "";
+  // 进度条与批量复制条一并收起（v1.19.0）
+  const progress = document.getElementById("extractProgress");
+  const copyAll = document.getElementById("copyAllBar");
+  if (progress) progress.classList.add("hidden");
+  if (copyAll) copyAll.classList.add("hidden");
   state.lastAutoValue = "";
   clearTimeout(state.autoExtractTimer);
   updateLinkCount();

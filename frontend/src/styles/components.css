@@ -89,10 +89,17 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   padding: 2px 10px;
   border-radius: var(--r-full);
 }
-/* 平台识别色与品牌体系无关，保留原样（方案 §4.3） */
-.platform-douyin { background: #1a1a1a; color: #fff; }
-.platform-xiaohongshu { background: #fff0f5; color: #d63384; }
+/* 平台识别色与品牌体系无关（方案 §4.3）。
+   2026-10-02 老大定调：全部「彩底白字」——抖音黑 / 小红书红 / 视频号黄，
+   色值集中在 tokens.css 的 --pf-*（小红书浅粉底 #fff0f5 + 粉字 #d63384 退场）。 */
+.platform-douyin { background: var(--pf-douyin); color: var(--pf-ink); }
+.platform-xiaohongshu { background: var(--pf-xhs); color: var(--pf-ink); }
 .result-index { font-size: var(--fs-sm); color: var(--ink-2); }
+
+/* 结果卡左侧 3px 平台色条（与 chip 同色；class 由 results.js 按 platform_raw 加） */
+.result-item.result-douyin { border-left: 3px solid var(--pf-douyin); }
+.result-item.result-xiaohongshu { border-left: 3px solid var(--pf-xhs); }
+.result-item.result-sph { border-left: 3px solid var(--pf-sph); }
 .result-badge { font-size: var(--fs-xs); padding: 2px 10px; border-radius: var(--r-full); font-weight: 600; }
 .badge-ok { background: var(--ok-soft); color: var(--ok-ink); }
 .badge-fail { background: var(--fail-soft); color: var(--fail-ink); }
@@ -296,11 +303,38 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
 }
 
 /* ===== 视频号平台标 + 重复提报警示（v1.13.1） ===== */
-/* 平台识别色与品牌体系无关，保留原色系（同 §4.3 约定） */
-.platform-sph { background: #E8F8EE; color: #07A254; }
+/* 2026-10-02 起视频号改「黄底白字」（--pf-sph 深金黄），旧浅绿底方案退场 */
+.platform-sph { background: var(--pf-sph); color: var(--pf-ink); }
 
 /* 重复提报警示：warn 语义色（浅底 + 描边） */
 .result-badge.badge-dup { background: var(--warn-soft); color: var(--warn-ink); border: 1px solid var(--warn-border); }
+
+/* ── 骨架卡 / 进度条 / 批量复制条（v1.19.0 交互期新增） ────── */
+.result-item.skeleton { pointer-events: none; }
+.skel {
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+  animation: skelPulse 1.2s ease-in-out infinite;
+}
+.skel-tag { display: inline-block; width: 56px; height: 18px; }
+.skel-cover { width: 76px; height: 100px; flex-shrink: 0; }
+.skel-line { height: 14px; margin-bottom: 8px; }
+.skel-line.w70 { width: 70%; }
+.skel-line.w90 { width: 90%; }
+.skel-line.w45 { width: 45%; }
+@keyframes skelPulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+
+/* 提取进度：蓝段=成功、红段=失败，完成后停留 2.5s 由 JS 收起 */
+.extract-progress {
+  display: flex; height: 3px; border-radius: 2px; overflow: hidden;
+  background: var(--surface-2); margin-bottom: 12px;
+}
+.extract-progress .seg { width: 0; transition: width .3s; }
+.extract-progress .seg.ok { background: var(--brand); }
+.extract-progress .seg.fail { background: var(--fail); }
+
+.copy-all-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.copy-all-hint { font-size: var(--fs-xs); color: var(--ink-2); }
 
 /* ===== 首次访问引导框（v1.16.0）=====
  * 取代 v1.13.1 的月度提示条 + v1.14.0 的姓名弹窗组合：两者曾同帧弹出、
