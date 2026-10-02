@@ -161,4 +161,17 @@ VERSION = _detect_version()
 
 
 
-ADMIN_SESSION_TTL = 8 * 60 * 60
+# 管理员会话时长。
+# - 短会话（登录时未勾选「记住我」）：8 小时，到点必须重新输口令。
+# - 长会话（勾选「记住我」）：绝对上限 90 天，且空闲超过 7 天自动失效（滑动续期）。
+#   两者都可用环境变量覆盖；长会话的空闲上限被夹到不超过绝对上限，避免配错导致永不失效。
+ADMIN_SESSION_TTL = _bounded_int_env("ADMIN_SESSION_TTL", 8 * 60 * 60, 5 * 60, 30 * 24 * 3600)
+
+ADMIN_SESSION_TTL_LONG = _bounded_int_env("ADMIN_SESSION_TTL_LONG", 90 * 24 * 3600, 3600, 365 * 24 * 3600)
+
+ADMIN_SESSION_IDLE = _bounded_int_env(
+    "ADMIN_SESSION_IDLE", 7 * 24 * 3600, 3600, ADMIN_SESSION_TTL_LONG
+)
+
+# 续期粒度：距上次签发超过这个时长才重新下发 cookie，避免每次轮询都产生 Set-Cookie。
+ADMIN_SESSION_RENEW = _bounded_int_env("ADMIN_SESSION_RENEW", 12 * 3600, 600, 30 * 24 * 3600)

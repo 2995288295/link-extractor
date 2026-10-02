@@ -14,7 +14,7 @@ import time
 import uuid
 
 
-from .config import ADMIN_SESSION_TTL, ADMIN_TOKEN, DEVICE_SECRET
+from .config import ADMIN_SESSION_IDLE, ADMIN_SESSION_TTL, ADMIN_TOKEN, DEVICE_SECRET
 from .ratelimit import _check_rate_limit
 
 
@@ -71,20 +71,60 @@ def _admin_require_rate(ip: str) -> bool:
 
 
 
-def _admin_session_value(timestamp: int) -> str:
-    payload = str(timestamp)
-    signature = hmac.new(ADMIN_TOKEN.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"{payload}.{signature}"
+def _admin_session_sign(payload: str) -> str:
+    """对会话载荷做 HMAC 签名（密钥 = 管理员口令，换口令即让全部会话失效）。"""
+    return hmac.new(ADMIN_TOKEN.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+
+def _admin_session_value(issued: int, expires: int | None = None) -> str:
+    """生成 admin_session cookie 值。
+
+    expires 为 None → **短会话**，载荷就是签发时间戳（旧格式，未勾「记住我」时保持不变）。
+    expires 非 None → **长会话**，载荷 `L.{签发时间}.{绝对到期时间}`，多带一个绝对到期时刻，
+    好让「90 天上限」与「空闲超时」两个条件能同时表达，且续期时上限不跟着往后滚。
+    """
+    if expires is None:
+        payload = str(issued)
+    else:
+        payload = f"L.{issued}.{expires}"
+    return f"{payload}.{_admin_session_sign(payload)}"
+
+
+
+def _admin_session_claims(value: str):
+    """校验并解析会话 cookie，返回 `(签发时间, 绝对到期时间或 None)`；无效返回 None。
+
+    `绝对到期时间为 None` 即短会话（按 ADMIN_SESSION_TTL 判定）；
+    长会话则同时受「不超过绝对到期时间」与「空闲不超过 ADMIN_SESSION_IDLE」两条约束。
+    """
+    if not value or "." not in value:
+        return None
+    # 签名段是 hexdigest（不含 "."），所以从右切一次即可兼容两种载荷格式
+    payload, signature = value.rsplit(".", 1)
+    if not hmac.compare_digest(_admin_session_sign(payload), signature):
+        return None
+    parts = payload.split(".")
+    now = int(time.time())
+    if len(parts) == 1:
+        try:
+            issued = int(parts[0])
+        except ValueError:
+            return None
+        if now < issued or now - issued > ADMIN_SESSION_TTL:
+            return None
+        return issued, None
+    if len(parts) == 3 and parts[0] == "L":
+        try:
+            issued, expires = int(parts[1]), int(parts[2])
+        except ValueError:
+            return None
+        if now < issued or now > expires or now - issued > ADMIN_SESSION_IDLE:
+            return None
+        return issued, expires
+    return None
 
 
 
 def _admin_session_valid(value: str) -> bool:
-    try:
-        payload, signature = value.split(".", 1)
-        timestamp = int(payload)
-    except (AttributeError, ValueError):
-        return False
-    if timestamp > int(time.time()) or int(time.time()) - timestamp > ADMIN_SESSION_TTL:
-        return False
-    expected = _admin_session_value(timestamp).split(".", 1)[1]
-    return hmac.compare_digest(signature, expected)
+    return _admin_session_claims(value) is not None

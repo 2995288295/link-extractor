@@ -31,17 +31,18 @@ export async function login() {
   const input = document.getElementById("adminTokenInput");
   const val = input.value.trim();
   if (!val) return;
+  const remember = document.getElementById("adminRemember").checked;
   try {
     const res = await fetch("/api/admin/login", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      credentials: "same-origin", body: JSON.stringify({ token: val }),
+      credentials: "same-origin", body: JSON.stringify({ token: val, remember: remember }),
     });
     const result = await res.json().catch(() => ({}));
     if (!res.ok || !result.success) throw new Error(result.error || "登录失败");
     await adminFetch("/api/admin/overview");
     overlay.classList.add("hidden");
     content.classList.remove("hidden");
-    showToast("登录成功");
+    showToast(remember ? "登录成功，90 天内免登录" : "登录成功");
     loadAll();
   } catch (e) {
     showToast(e.message.includes("频繁") ? e.message : "口令错误");

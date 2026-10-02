@@ -78,6 +78,8 @@ tr:last-child td { border-bottom: none; }
 .login-box { background: #fff; border-radius: var(--radius); padding: 24px; width: 100%; max-width: 340px; }
 .login-box h2 { font-size: 16px; margin-bottom: 6px; }
 .login-box p { font-size: 13px; color: var(--text2); margin-bottom: 14px; }
+.remember-row { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text2); margin: -4px 0 14px; cursor: pointer; }
+.remember-row input { width: auto; margin: 0; cursor: pointer; }
 input {
   width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
   font-size: 14px; outline: none; margin-bottom: 12px;

@@ -1,9 +1,10 @@
 """Flask 全局请求钩子（P5 拆包自 app.py）。
 
-5 个 `@app.before_request` / `@app.after_request` 钩子。**执行顺序 = 注册顺序**，
+6 个 `@app.before_request` / `@app.after_request` 钩子。**执行顺序 = 注册顺序**，
 本模块按原文件顺序注册，故顺序与拆包前完全一致：
   ① 请求开始打日志  ② 访问口令  ③ 管理员鉴权  ④ 请求结束打日志
-  ⑤ 响应优化（gzip / 静态资源缓存头 / 基础安全响应头）
+  ⑤ 长会话滑动续期（只重发 admin_session cookie，不碰响应体）
+  ⑥ 响应优化（gzip / 静态资源缓存头 / 基础安全响应头）
 
 ⚠️ 本模块顶层 `from . import app` —— 依赖 `app_web/__init__.py` 先把 `app` 建好再导入本模块。
 """
@@ -17,8 +18,8 @@ import time
 from flask import jsonify, request
 
 from . import app
-from .config import ACCESS_TOKEN, ADMIN_TOKEN, log
-from .security import _admin_session_valid
+from .config import ACCESS_TOKEN, ADMIN_SESSION_RENEW, ADMIN_TOKEN, log
+from .security import _admin_session_claims, _admin_session_valid, _admin_session_value
 
 
 # ---------------------------------------------------------------- 请求日志
@@ -88,6 +89,40 @@ def _log_request_end(response):
 
 
 # ---------------------------------------------------------------- API
+
+@app.after_request
+def _renew_admin_session(response):
+    """长会话滑动续期：距上次签发超过 ADMIN_SESSION_RENEW 时，重新下发 cookie。
+
+    只对**长会话**（「记住我」）生效，且续期时 `expires` 保持原值不动 ——
+    所以「90 天绝对上限」不会被续期动作一次次往后推，只有「空闲 7 天」这条会滚动。
+
+    之所以放在 after_request：before_request 里改不了 response 的 Set-Cookie。
+    """
+    if not request.path.startswith("/api/admin/"):
+        return response
+    if request.path in ("/api/admin/login", "/api/admin/logout"):
+        return response
+    claims = _admin_session_claims(request.cookies.get("admin_session", ""))
+    if claims is None:
+        return response
+    issued, expires = claims
+    if expires is None:      # 短会话保持原语义：8 小时绝对过期，不续期
+        return response
+    now = int(time.time())
+    if now - issued < ADMIN_SESSION_RENEW:
+        return response
+    max_age = expires - now
+    if max_age <= 0:
+        return response
+    response.set_cookie(
+        "admin_session", _admin_session_value(now, expires),
+        max_age=max_age, httponly=True, secure=request.is_secure,
+        samesite="Lax", path="/",
+    )
+    return response
+
+
 
 @app.after_request
 def _optimize_response(response):

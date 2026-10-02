@@ -85,6 +85,8 @@ tr:last-child td { border-bottom: none; }
 .login-box { background: #fff; border-radius: var(--radius); padding: 24px; width: 100%; max-width: 340px; }
 .login-box h2 { font-size: 16px; margin-bottom: 6px; }
 .login-box p { font-size: 13px; color: var(--text2); margin-bottom: 14px; }
+.remember-row { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text2); margin: -4px 0 14px; cursor: pointer; }
+.remember-row input { width: auto; margin: 0; cursor: pointer; }
 input {
   width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
   font-size: 14px; outline: none; margin-bottom: 12px;
@@ -457,6 +459,7 @@ section.section-alerts { margin-bottom:16px; }
     <h2>管理员登录</h2>
     <p>请输入管理员口令以访问运营看板</p>
     <input type="password" id="adminTokenInput" placeholder="管理员口令">
+    <label class="remember-row"><input type="checkbox" id="adminRemember"><span>记住我（90 天内免登录）</span></label>
     <button class="btn btn-primary" id="loginBtn">登录</button>
   </div>
 </div>
@@ -504,17 +507,18 @@ async function login() {
   const input = document.getElementById("adminTokenInput");
   const val = input.value.trim();
   if (!val) return;
+  const remember = document.getElementById("adminRemember").checked;
   try {
     const res = await fetch("/api/admin/login", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      credentials: "same-origin", body: JSON.stringify({ token: val }),
+      credentials: "same-origin", body: JSON.stringify({ token: val, remember: remember }),
     });
     const result = await res.json().catch(() => ({}));
     if (!res.ok || !result.success) throw new Error(result.error || "登录失败");
     await adminFetch("/api/admin/overview");
     overlay.classList.add("hidden");
     content.classList.remove("hidden");
-    showToast("登录成功");
+    showToast(remember ? "登录成功，90 天内免登录" : "登录成功");
     loadAll();
   } catch (e) {
     showToast(e.message.includes("频繁") ? e.message : "口令错误");

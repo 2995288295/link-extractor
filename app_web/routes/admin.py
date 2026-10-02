@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from flask import jsonify, make_response, request
 
 from .. import app
-from ..config import ADMIN_SESSION_TTL, ADMIN_TOKEN, GLOBAL_EXTRACT_CONCURRENCY, _effective_extract_concurrency, log
+from ..config import ADMIN_SESSION_TTL, ADMIN_SESSION_TTL_LONG, ADMIN_TOKEN, GLOBAL_EXTRACT_CONCURRENCY, _effective_extract_concurrency, log
 from ..db import _admin_audit, _get_db
 from ..ratelimit import _check_rate_limit
 from ..security import _admin_require_rate, _admin_session_value
@@ -33,14 +33,19 @@ def api_admin_login():
     if not ADMIN_TOKEN or not provided or not hmac.compare_digest(provided, ADMIN_TOKEN):
         log.warning("管理员登录失败 from %s", ip)
         return jsonify({"success": False, "error": "管理员口令错误"}), 401
-    response = make_response(jsonify({"success": True}))
+    # 勾了「记住我」→ 长会话（90 天绝对上限 + 7 天空闲失效）；否则短会话 8 小时
+    remember = bool(payload.get("remember"))
+    now = int(time.time())
+    lifetime = ADMIN_SESSION_TTL_LONG if remember else ADMIN_SESSION_TTL
+    expires = now + lifetime if remember else None      # None = 短会话（沿用旧格式）
+    response = make_response(jsonify({"success": True, "remember": remember}))
     response.set_cookie(
-        "admin_session", _admin_session_value(int(time.time())),
-        max_age=ADMIN_SESSION_TTL, httponly=True, secure=request.is_secure,
+        "admin_session", _admin_session_value(now, expires),
+        max_age=lifetime, httponly=True, secure=request.is_secure,
         samesite="Lax", path="/",
     )
-    response.set_cookie("csrf_token", secrets.token_urlsafe(24), max_age=ADMIN_SESSION_TTL, httponly=False, secure=request.is_secure, samesite="Lax", path="/")
-    _admin_audit("login", ip)
+    response.set_cookie("csrf_token", secrets.token_urlsafe(24), max_age=lifetime, httponly=False, secure=request.is_secure, samesite="Lax", path="/")
+    _admin_audit("login_remember" if remember else "login", ip)
     return response
 
 
