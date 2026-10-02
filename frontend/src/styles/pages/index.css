@@ -6,7 +6,14 @@
 .container { max-width: 960px; margin: 0 auto; padding: 24px 16px 96px; }
 
 /* ── 页头 ─────────────────────────────────────────────────── */
-header { text-align: center; padding: 32px 0 24px; }
+/* v1.21.0 品牌氛围：顶部一层极淡的品牌蓝径向光晕（峰值 8% 透明度，72% 处衰减完），
+   给纯灰底一点「设计过」的层次；文字不受影响（对比度由 --ink 保证）。
+   23,105,224 = 品牌蓝 #1769E0。 */
+header {
+  text-align: center;
+  padding: 32px 0 24px;
+  background: radial-gradient(ellipse 520px 220px at 50% 0%, rgba(23, 105, 224, .08), transparent 72%);
+}
 /* 品牌标识：品牌色做成实心胶囊块（蓝底白字）。
    注：P2 曾用黄底黑字胶囊（因黄字在 --bg 上仅 ≈1.05:1 看不见）；
    2026-09-27 品牌色改回蓝，胶囊结构保留。 */

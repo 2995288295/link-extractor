@@ -27,8 +27,9 @@ textarea {
   outline: none;
   transition: border-color .15s;
 }
-/* 聚焦态：原来用品牌蓝，品牌色换黄后蓝色成了体系外的孤色；改中性深色底纹 */
-textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 31, .10); }
+/* 聚焦态：v1.21.0 恢复品牌蓝描边 + 蓝色柔光。当年改中性色是因为品牌是黄、
+   蓝成孤色；2026-09-27 品牌改回蓝后，聚焦环与主按钮/页头光晕呼应成体系 */
+textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(23, 105, 224, .12); }
 
 /* ── 按钮 ─────────────────────────────────────────────────── */
 .toolbar { display: flex; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
@@ -62,12 +63,20 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   color: var(--ink-2);
   min-height: 20px;
 }
-/* 强调文字统一走 --ink（黄不能当文字色，方案 §4.2） */
+/* 强调文字统一走 --ink（黄不能当文字色，方案 §4.2）；
+   inline-block 是为了 v1.21.0 的 countPop 缩放动画能生效 */
 .link-count .count {
+  display: inline-block;
   font-weight: 700;
   color: var(--ink);
 }
 .link-count .count.zero { color: var(--ink-2); }
+/* 数字变化时弹跳一下（v1.21.0）：由 input.js 在计数值变化时挂 .pop 触发 */
+@keyframes countPop {
+  from { transform: scale(1.4); color: var(--brand); }
+  to   { transform: scale(1); }
+}
+.link-count .count.pop { animation: countPop .25s ease-out; }
 
 /* ── 结果条目 ─────────────────────────────────────────────── */
 .result-item {
@@ -223,7 +232,8 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
   padding: 16px;
   text-align: center;
 }
-.stat-card .num { font-size: var(--fs-2xl); font-weight: 600; color: var(--ink); line-height: 1.2; }
+/* 大数字等宽（tabular-nums）：数字跳动时不横向抖（v1.21.0） */
+.stat-card .num { font-size: var(--fs-2xl); font-weight: 600; color: var(--ink); line-height: 1.2; font-variant-numeric: tabular-nums; }
 .stat-card .label { font-size: var(--fs-xs); color: var(--ink-2); margin-top: 4px; }
 .stat-card .sub { font-size: 11px; color: var(--ink-2); margin-top: 2px; }
 .stat-card.ok .num { color: var(--ok); }
@@ -242,14 +252,41 @@ textarea:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(20, 24, 
 .trend-line .dot:hover { fill: var(--accent-hover); }
 .trend-line .value-label { font-size: 11px; fill: var(--ink-2); }
 
-.platform-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-.platform-chip {
-  font-size: var(--fs-xs);
-  padding: 4px 12px;
+/* ── 平台分布 stacked bar（v1.21.0，替代灰 pill） ───────────
+   段色复用 chip 三色令牌（抖音黑/小红书红/视频号深金黄），一屏与结果卡互相印证。
+   未知平台回退 --ink-3 灰。 */
+.pf-bar {
+  display: flex;
+  gap: 2px;
+  height: 12px;
   border-radius: var(--r-full);
+  overflow: hidden;
+  margin-top: 10px;
   background: var(--surface-2);
-  color: var(--ink);
 }
+.pf-seg { min-width: 6px; transition: width .4s ease; }
+.pf-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: var(--fs-xs); color: var(--ink-2); }
+.pf-legend-item b { color: var(--ink); font-weight: 650; }
+.pf-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  margin-right: 5px;
+}
+.pf-empty { color: var(--ink-2); font-size: 13px; padding: 4px 0; }
+
+/* ── 空状态（v1.21.0） ────────────────────────────────────── */
+.empty-state { text-align: center; padding: 32px 16px 28px; }
+.empty-state .icon {
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px;
+  margin: 0 auto 12px;
+}
+.empty-state .title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
+.empty-state .desc { font-size: var(--fs-sm); color: var(--ink-2); margin-top: 4px; }
 
 /* ── 使用提示 ─────────────────────────────────────────────── */
 .disclaimer {

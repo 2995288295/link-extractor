@@ -31,6 +31,8 @@ export function extractUrls(text) {
     .filter(u => u && !seen.has(u) && seen.add(u));
 }
 
+let lastCount = 0;
+
 /** 实时统计输入框中的链接数 */
 export function updateLinkCount() {
   const raw = document.getElementById("inputUrls").value;
@@ -39,8 +41,18 @@ export function updateLinkCount() {
   if (count === 0) {
     el.innerHTML = "";
   } else {
-    el.innerHTML = `🔗 已识别 <span class="count">${count}</span> 条链接` + (count > 20 ? '<span style="color:var(--error);margin-left:8px;">（超过 20 条上限，请分批）</span>' : "");
+    const over = count > 20 ? '<span style="color:var(--error);margin-left:8px;">（超过 20 条上限，请分批）</span>' : "";
+    el.innerHTML = `🔗 已识别 <span class="count">${count}</span> 条链接` + over;
+    // 数字变化时弹跳一下（v1.21.0）：countPop 缩放 + 品牌蓝闪现
+    if (count !== lastCount) {
+      const span = el.querySelector(".count");
+      if (span) {
+        span.classList.add("pop");
+        span.addEventListener("animationend", () => span.classList.remove("pop"), { once: true });
+      }
+    }
   }
+  lastCount = count;
 }
 
 /** 输入变化：更新计数 + 防抖 1 秒自动提取 */

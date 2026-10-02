@@ -59,11 +59,21 @@ function renderHistoryList() {
     ? `筛选出 ${filtered.length} / ${lastItems.length} 条（仅自己可见）`
     : (lastItems.length ? `共 ${lastItems.length} 条历史记录（仅自己可见）` : "暂无历史记录");
   if (!lastItems.length) {
-    list.innerHTML = '<div class="card" style="color:var(--text2);text-align:center;">暂无历史记录</div>';
+    list.innerHTML = `
+      <div class="card empty-state">
+        <div class="icon">🗂️</div>
+        <div class="title">还没有历史记录</div>
+        <div class="desc">回到「提取」页粘贴第一条链接试试 —— 提取成功后会自动存档，仅自己可见</div>
+      </div>`;
     return;
   }
   if (!filtered.length) {
-    list.innerHTML = '<div class="card" style="color:var(--text2);text-align:center;">当前筛选条件下没有记录</div>';
+    list.innerHTML = `
+      <div class="card empty-state">
+        <div class="icon">🔍</div>
+        <div class="title">没有匹配的记录</div>
+        <div class="desc">换个关键词，或把平台筛选切回「全部」再试</div>
+      </div>`;
     return;
   }
   list.innerHTML = filtered.map((h, i) => `

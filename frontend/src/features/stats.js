@@ -59,10 +59,30 @@ function renderMonthlyCard(monthly, profile) {
 }
 
 export function renderStats(s) {
-  // 顶部指标卡
-  const platformChips = Object.entries(s.platform_dist || {})
-    .map(([name, cnt]) => `<span class="platform-chip">${esc(name)} ${cnt} 条</span>`)
-    .join("");
+  // 平台分布：灰 pill → 三色 stacked bar + 图例（v1.21.0）
+  // 段色与结果卡 chip 三色同源（tokens.css --pf-*），未知平台回退灰
+  const PF_COLORS = { "抖音": "var(--pf-douyin)", "小红书": "var(--pf-xhs)", "视频号": "var(--pf-sph)" };
+  const pfColor = (name) => PF_COLORS[name] || "var(--ink-3)";
+  const dist = Object.entries(s.platform_dist || {});
+  const pfTotal = dist.reduce((acc, [, cnt]) => acc + cnt, 0);
+  let platformHtml;
+  if (!pfTotal) {
+    platformHtml = '<div class="pf-empty">暂无成功提取记录</div>';
+  } else {
+    const segs = dist.map(([name, cnt]) => {
+      const pct = (cnt / pfTotal) * 100;
+      return `<div class="pf-seg" style="width:${pct}%;background:${pfColor(name)}" title="${esc(name)} ${cnt} 条（${Math.round(pct)}%）"></div>`;
+    }).join("");
+    const legend = dist.map(([name, cnt]) =>
+      `<span class="pf-legend-item"><i class="pf-dot" style="background:${pfColor(name)}"></i>${esc(name)} <b>${cnt}</b> 条 · ${Math.round((cnt / pfTotal) * 100)}%</span>`
+    ).join("");
+    const aria = dist.map(([n, c]) => `${n} ${c} 条`).join("，");
+    platformHtml = `<div class="pf-bar" role="img" aria-label="平台分布：${esc(aria)}">${segs}</div><div class="pf-legend">${legend}</div>`;
+  }
+
+  // 成功率按值着色（v1.21.0）：≥95% 绿 / <80% 红 / 其余中性
+  const rate = Number(s.success_rate) || 0;
+  const rateClass = rate >= 95 ? " ok" : rate < 80 ? " fail" : "";
   const grid = document.getElementById("statsGrid");
   grid.innerHTML = `
     <div class="stat-card ok">
@@ -70,14 +90,14 @@ export function renderStats(s) {
       <div class="label">累计提取</div>
       <div class="sub">${s.ok} 成功 · ${s.fail} 失败</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card${rateClass}">
       <div class="num">${s.success_rate}%</div>
       <div class="label">成功率</div>
       <div class="sub">${s.total ? "最近 200 条内统计" : "暂无数据"}</div>
     </div>
     <div class="card" style="grid-column: 1 / -1;">
       <h2 style="margin-bottom:4px;">平台分布</h2>
-      <div class="platform-chips">${platformChips || '<span style="color:var(--text2);font-size:13px;">暂无成功提取记录</span>'}</div>
+      ${platformHtml}
     </div>`;
 
   // 趋势折线图（SVG）
@@ -118,9 +138,15 @@ export function renderStats(s) {
 
   trend.innerHTML = `
     <svg class="trend-line" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" style="stop-color:var(--accent);stop-opacity:.18"/>
+          <stop offset="100%" style="stop-color:var(--accent);stop-opacity:0"/>
+        </linearGradient>
+      </defs>
       ${trendGrid}
-      <path d="${areaPath}" fill="var(--primary)" opacity="0.08"/>
-      <path d="${linePath}" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      <path d="${areaPath}" fill="url(#trendFill)"/>
+      <path d="${linePath}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
       ${dots}
     </svg>`;
 }
